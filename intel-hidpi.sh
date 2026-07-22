@@ -4,7 +4,9 @@ set -u
 set -o pipefail
 
 readonly DEFAULT_OVERRIDES_ROOT="/Library/Displays/Contents/Resources/Overrides"
+readonly DEFAULT_STATE_ROOT="/Library/Application Support/one-key-hidpi"
 readonly DEFAULT_FRAMEBUFFER_LIMIT=8192
+readonly MANIFEST_VERSION=1
 readonly PRESET_NAMES=("compact" "balanced" "spacious" "dense" "native")
 readonly PRESET_NUMERATORS=(1 3 2 3 1)
 readonly PRESET_DENOMINATORS=(2 5 3 4 1)
@@ -14,11 +16,15 @@ usage() {
 Usage:
   intel-hidpi.sh inventory [--ioreg-file PATH] [--overrides-root PATH]
   intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS]
+  intel-hidpi.sh apply --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--overrides-root PATH] [--state-root PATH] --confirm
+  intel-hidpi.sh revert --vendor-id HEX --product-id HEX [--overrides-root PATH] [--state-root PATH] --confirm
 
 Commands:
   inventory  Read connected Intel-compatible external display metadata and
              existing EDID override modes. This command never writes files.
   preview    Generate candidate 2x HiDPI modes without writing an override.
+  apply      Merge generated modes into one target override after confirmation.
+  revert     Restore or remove only the target override recorded by apply.
 EOF
 }
 
@@ -66,6 +72,10 @@ hidpi_payload() {
         /usr/bin/base64 |
         /usr/bin/tr -d '\n'
 }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || fail "could not resolve script directory"
+readonly SCRIPT_DIR
+source "${SCRIPT_DIR}/lib/intel_hidpi_storage.sh" || fail "could not load Intel HiDPI storage helpers"
 
 print_preview_mode() {
     local name="$1"
@@ -321,71 +331,175 @@ inventory() {
     ((display_index > 0)) || fail "no valid IODisplayEDID entries found"
 }
 
-main() {
-    local command="${1:-}"
+run_inventory_command() {
     local ioreg_file=""
     local overrides_root="$DEFAULT_OVERRIDES_ROOT"
+
+    while (($# > 0)); do
+        case "$1" in
+        --ioreg-file)
+            (($# >= 2)) || fail "--ioreg-file requires a path"
+            ioreg_file="$2"
+            shift 2
+            ;;
+        --overrides-root)
+            (($# >= 2)) || fail "--overrides-root requires a path"
+            overrides_root="$2"
+            shift 2
+            ;;
+        *)
+            fail "unknown inventory option: $1"
+            ;;
+        esac
+    done
+
+    inventory "$ioreg_file" "$overrides_root"
+}
+
+run_preview_command() {
     local native_resolution=""
     local framebuffer_limit="$DEFAULT_FRAMEBUFFER_LIMIT"
+
+    while (($# > 0)); do
+        case "$1" in
+        --native-resolution)
+            (($# >= 2)) || fail "--native-resolution requires WIDTHxHEIGHT"
+            native_resolution="$2"
+            shift 2
+            ;;
+        --framebuffer-limit)
+            (($# >= 2)) || fail "--framebuffer-limit requires a positive integer"
+            framebuffer_limit="$2"
+            shift 2
+            ;;
+        *)
+            fail "unknown preview option: $1"
+            ;;
+        esac
+    done
+
+    [[ -n "$native_resolution" ]] || fail "--native-resolution is required"
+    preview "$native_resolution" "$framebuffer_limit"
+}
+
+run_apply_command() {
+    local vendor_id=""
+    local product_id=""
+    local native_resolution=""
+    local overrides_root="$DEFAULT_OVERRIDES_ROOT"
+    local state_root="$DEFAULT_STATE_ROOT"
+    local confirmed=false
+
+    while (($# > 0)); do
+        case "$1" in
+        --vendor-id)
+            (($# >= 2)) || fail "--vendor-id requires a hexadecimal value"
+            vendor_id="$2"
+            shift 2
+            ;;
+        --product-id)
+            (($# >= 2)) || fail "--product-id requires a hexadecimal value"
+            product_id="$2"
+            shift 2
+            ;;
+        --native-resolution)
+            (($# >= 2)) || fail "--native-resolution requires WIDTHxHEIGHT"
+            native_resolution="$2"
+            shift 2
+            ;;
+        --overrides-root)
+            (($# >= 2)) || fail "--overrides-root requires a path"
+            overrides_root="$2"
+            shift 2
+            ;;
+        --state-root)
+            (($# >= 2)) || fail "--state-root requires a path"
+            state_root="$2"
+            shift 2
+            ;;
+        --confirm)
+            confirmed=true
+            shift
+            ;;
+        *)
+            fail "unknown apply option: $1"
+            ;;
+        esac
+    done
+
+    [[ -n "$vendor_id" && -n "$product_id" && -n "$native_resolution" ]] || fail "apply requires vendor id, product id, and native resolution"
+    apply_override "$vendor_id" "$product_id" "$native_resolution" "$overrides_root" "$state_root" "$confirmed"
+}
+
+run_revert_command() {
+    local vendor_id=""
+    local product_id=""
+    local overrides_root="$DEFAULT_OVERRIDES_ROOT"
+    local state_root="$DEFAULT_STATE_ROOT"
+    local confirmed=false
+
+    while (($# > 0)); do
+        case "$1" in
+        --vendor-id)
+            (($# >= 2)) || fail "--vendor-id requires a hexadecimal value"
+            vendor_id="$2"
+            shift 2
+            ;;
+        --product-id)
+            (($# >= 2)) || fail "--product-id requires a hexadecimal value"
+            product_id="$2"
+            shift 2
+            ;;
+        --overrides-root)
+            (($# >= 2)) || fail "--overrides-root requires a path"
+            overrides_root="$2"
+            shift 2
+            ;;
+        --state-root)
+            (($# >= 2)) || fail "--state-root requires a path"
+            state_root="$2"
+            shift 2
+            ;;
+        --confirm)
+            confirmed=true
+            shift
+            ;;
+        *)
+            fail "unknown revert option: $1"
+            ;;
+        esac
+    done
+
+    [[ -n "$vendor_id" && -n "$product_id" ]] || fail "revert requires vendor id and product id"
+    revert_override "$vendor_id" "$product_id" "$overrides_root" "$state_root" "$confirmed"
+}
+
+main() {
+    local command="${1:-}"
 
     case "$command" in
     inventory)
         shift
+        run_inventory_command "$@"
         ;;
     preview)
         shift
+        run_preview_command "$@"
+        ;;
+    apply)
+        shift
+        run_apply_command "$@"
+        ;;
+    revert)
+        shift
+        run_revert_command "$@"
         ;;
     -h|--help|help|"")
         usage
-        return 0
         ;;
     *)
         usage >&2
         return 2
-        ;;
-    esac
-
-    case "$command" in
-    inventory)
-        while (($# > 0)); do
-            case "$1" in
-            --ioreg-file)
-                (($# >= 2)) || fail "--ioreg-file requires a path"
-                ioreg_file="$2"
-                shift 2
-                ;;
-            --overrides-root)
-                (($# >= 2)) || fail "--overrides-root requires a path"
-                overrides_root="$2"
-                shift 2
-                ;;
-            *)
-                fail "unknown inventory option: $1"
-                ;;
-            esac
-        done
-        inventory "$ioreg_file" "$overrides_root"
-        ;;
-    preview)
-        while (($# > 0)); do
-            case "$1" in
-            --native-resolution)
-                (($# >= 2)) || fail "--native-resolution requires WIDTHxHEIGHT"
-                native_resolution="$2"
-                shift 2
-                ;;
-            --framebuffer-limit)
-                (($# >= 2)) || fail "--framebuffer-limit requires a positive integer"
-                framebuffer_limit="$2"
-                shift 2
-                ;;
-            *)
-                fail "unknown preview option: $1"
-                ;;
-            esac
-        done
-        [[ -n "$native_resolution" ]] || fail "--native-resolution is required"
-        preview "$native_resolution" "$framebuffer_limit"
         ;;
     esac
 }

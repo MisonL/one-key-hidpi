@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>DisplayProductID</key>
+    <integer>30583</integer>
+    <key>DisplayVendorID</key>
+    <integer>12462</integer>
+    <key>custom-metadata</key>
+    <string>sibling-must-survive</string>
+</dict>
+</plist>

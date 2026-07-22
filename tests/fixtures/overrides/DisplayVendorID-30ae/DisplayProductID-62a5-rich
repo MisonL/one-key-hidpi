@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>DisplayProductID</key>
+    <integer>25253</integer>
+    <key>DisplayVendorID</key>
+    <integer>12462</integer>
+    <key>IODisplayEDID</key>
+    <data>AAECAwQFBgcICQ==</data>
+    <key>custom-metadata</key>
+    <string>preserve-me</string>
+    <key>scale-resolutions</key>
+    <array>
+        <data>AAANAAAAB1A=</data>
+        <data>AAAPAAAACHAAAAABACAAAA==</data>
+    </array>
+</dict>
+</plist>
