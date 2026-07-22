@@ -90,6 +90,7 @@ target_path="${overrides_root}/DisplayVendorID-30ae/DisplayProductID-62a5"
 manifest_path="${state_root}/DisplayVendorID-30ae/DisplayProductID-62a5/manifest.plist"
 original_path="${state_root}/DisplayVendorID-30ae/DisplayProductID-62a5/original.plist"
 candidate_hash="$(sha256_file "$target_path")"
+normalized_overrides_root="$(/bin/realpath "$overrides_root")" || fail "could not normalize overrides root"
 
 assert_plist_value "$target_path" custom-metadata preserve-me
 assert_plist_value "$target_path" DisplayVendorID 12462
@@ -106,7 +107,8 @@ assert_file_exists "$original_path"
 assert_file_mode "$target_path" 644
 assert_file_mode "$manifest_path" 644
 assert_file_mode "$original_path" 600
-assert_plist_value "$manifest_path" manifest-version 1
+assert_plist_value "$manifest_path" manifest-version 2
+assert_plist_value "$manifest_path" overrides-root "$normalized_overrides_root"
 assert_plist_value "$manifest_path" target-existed true
 assert_plist_value "$manifest_path" native-resolution 3840x2160
 assert_plist_value "$manifest_path" original-sha256 "$existing_original_hash"
@@ -127,6 +129,7 @@ assert_file_mode "$target_path" 600
 assert_plist_value "${overrides_root}/DisplayVendorID-30ae/DisplayProductID-7777" custom-metadata sibling-must-survive
 assert_file_absent "$manifest_path"
 assert_file_absent "$original_path"
+assert_directory_absent "${overrides_root}/.one-key-hidpi-locks"
 
 if "${repo_dir}/intel-hidpi.sh" apply \
     --vendor-id 30ae \
@@ -192,6 +195,69 @@ assert_file_mode "$new_target_path" 644
 
 assert_file_absent "$new_target_path"
 assert_file_absent "$new_manifest_path"
+
+bound_overrides_root="${scratch_dir}/bound-overrides"
+wrong_overrides_root="${scratch_dir}/wrong-overrides"
+bound_state_root="${scratch_dir}/bound-state"
+bound_target_path="${bound_overrides_root}/DisplayVendorID-7/DisplayProductID-8"
+wrong_target_path="${wrong_overrides_root}/DisplayVendorID-7/DisplayProductID-8"
+bound_manifest_path="${bound_state_root}/DisplayVendorID-7/DisplayProductID-8/manifest.plist"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 7 \
+    --product-id 8 \
+    --native-resolution 1920x1080 \
+    --overrides-root "$bound_overrides_root" \
+    --state-root "$bound_state_root" \
+    --confirm || fail "apply for override-root binding should succeed"
+/bin/mkdir -p "$(/usr/bin/dirname "$wrong_target_path")"
+/bin/cp "$bound_target_path" "$wrong_target_path"
+wrong_root_output=""
+if wrong_root_output="$("${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 7 \
+    --product-id 8 \
+    --overrides-root "$wrong_overrides_root" \
+    --state-root "$bound_state_root" \
+    --confirm 2>&1)"; then
+    fail "revert must reject a manifest for a different overrides root"
+fi
+assert_contains "$wrong_root_output" "manifest override root does not match this target"
+assert_file_exists "$wrong_target_path"
+assert_file_exists "$bound_manifest_path"
+assert_directory_absent "${wrong_overrides_root}/.one-key-hidpi-locks"
+"${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 7 \
+    --product-id 8 \
+    --overrides-root "$bound_overrides_root" \
+    --state-root "$bound_state_root" \
+    --confirm || fail "revert with the manifest overrides root should succeed"
+assert_file_absent "$bound_target_path"
+assert_file_exists "$wrong_target_path"
+
+legacy_state_overrides_root="${scratch_dir}/legacy-state-overrides"
+legacy_state_root="${scratch_dir}/legacy-state"
+legacy_state_target_path="${legacy_state_overrides_root}/DisplayVendorID-9/DisplayProductID-a"
+legacy_state_manifest_path="${legacy_state_root}/DisplayVendorID-9/DisplayProductID-a/manifest.plist"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 9 \
+    --product-id a \
+    --native-resolution 1920x1080 \
+    --overrides-root "$legacy_state_overrides_root" \
+    --state-root "$legacy_state_root" \
+    --confirm || fail "apply for legacy-state rejection should succeed"
+/usr/bin/plutil -replace manifest-version -integer 1 "$legacy_state_manifest_path" || fail "could not create legacy manifest fixture"
+legacy_state_output=""
+if legacy_state_output="$("${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 9 \
+    --product-id a \
+    --overrides-root "$legacy_state_overrides_root" \
+    --state-root "$legacy_state_root" \
+    --confirm 2>&1)"; then
+    fail "revert must reject a legacy manifest without an overrides root binding"
+fi
+assert_contains "$legacy_state_output" "manifest version is unsupported"
+assert_file_exists "$legacy_state_target_path"
+assert_file_exists "$legacy_state_manifest_path"
+assert_directory_absent "${legacy_state_overrides_root}/.one-key-hidpi-locks"
 
 "${repo_dir}/intel-hidpi.sh" apply \
     --vendor-id 4c2d \
@@ -305,9 +371,11 @@ if "${repo_dir}/intel-hidpi.sh" apply \
 fi
 assert_file_absent "${overrides_root}/DisplayVendorID-1/DisplayProductID-4"
 
-locks_dir="${state_root}/.locks"
-lock_path="${locks_dir}/DisplayVendorID-1-DisplayProductID-5.lock"
-/bin/mkdir -p "$locks_dir"
+lock_path="$(
+    /bin/bash -c 'source "$1"; target_lock_path "$2" "$3" "$4"' bash \
+        "${repo_dir}/lib/intel_hidpi_storage.sh" "$normalized_overrides_root" 1 5
+)" || fail "could not calculate target lock path"
+/bin/mkdir -p "$(/usr/bin/dirname "$lock_path")" || fail "could not create target lock directory"
 /usr/bin/shlock -f "$lock_path" -p "$$" >/dev/null 2>&1 || fail "could not create a test lock"
 lock_output=""
 if lock_output="$("${repo_dir}/intel-hidpi.sh" apply \
@@ -323,14 +391,17 @@ assert_contains "$lock_output" "could not acquire display operation lock"
 assert_file_absent "${overrides_root}/DisplayVendorID-1/DisplayProductID-5"
 /bin/rm -f "$lock_path"
 
-normalized_state_root="$(/bin/realpath "$state_root")" || fail "could not normalize state root for interrupted-lock test"
-interrupted_lock_path="${normalized_state_root}/.locks/DisplayVendorID-1-DisplayProductID-8.lock"
+second_operation_state_root="${scratch_dir}/second-operation-state"
+interrupted_lock_path="$(
+    /bin/bash -c 'source "$1"; target_lock_path "$2" "$3" "$4"' bash \
+        "${repo_dir}/lib/intel_hidpi_storage.sh" "$normalized_overrides_root" 1 8
+)" || fail "could not calculate interrupted target lock path"
 /bin/bash -c '
     source "$1"
     reset_operation_cleanup_state
     acquire_display_lock "$2" 1 8 || exit 1
     sleep 30
-' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$normalized_state_root" &
+' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$normalized_overrides_root" &
 interrupted_lock_pid=$!
 for _ in {1..100}; do
     [[ -f "$interrupted_lock_path" ]] && break
@@ -341,6 +412,19 @@ if [[ ! -f "$interrupted_lock_path" ]]; then
     wait "$interrupted_lock_pid" 2>/dev/null || true
     fail "interrupted operation did not acquire its display lock"
 fi
+concurrent_lock_output=""
+if concurrent_lock_output="$("${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 1 \
+    --product-id 8 \
+    --native-resolution 1920x1080 \
+    --overrides-root "$overrides_root" \
+    --state-root "$second_operation_state_root" \
+    --confirm 2>&1)"; then
+    fail "a different state root must not bypass a target operation lock"
+fi
+assert_contains "$concurrent_lock_output" "could not acquire display operation lock"
+assert_file_absent "${overrides_root}/DisplayVendorID-1/DisplayProductID-8"
+assert_directory_absent "${second_operation_state_root}/DisplayVendorID-1"
 /bin/kill -TERM "$interrupted_lock_pid" || fail "could not terminate the interrupted operation"
 wait "$interrupted_lock_pid" 2>/dev/null || true
 assert_file_absent "$interrupted_lock_path"

@@ -167,15 +167,15 @@ ensure_directory_path_without_symlinks() {
 }
 
 acquire_display_lock() {
-    local state_root="$1"
+    local overrides_root="$1"
     local vendor_id="$2"
     local product_id="$3"
     local locks_directory
     local lock_path
 
-    locks_directory="${state_root}/.locks"
+    locks_directory="${overrides_root}/.one-key-hidpi-locks"
     ensure_directory_path_without_symlinks "$locks_directory" || return 1
-    lock_path="${locks_directory}/DisplayVendorID-${vendor_id}-DisplayProductID-${product_id}.lock"
+    lock_path="$(target_lock_path "$overrides_root" "$vendor_id" "$product_id")" || return 1
     [[ ! -L "$lock_path" ]] || return 1
     /usr/bin/shlock -f "$lock_path" -p "$$" >/dev/null 2>&1 || return 1
     OPERATION_LOCK_PATH="$lock_path"
@@ -209,6 +209,17 @@ path_for_display() {
     local product_id="$3"
 
     printf '%s/DisplayVendorID-%s/DisplayProductID-%s\n' "$root" "$vendor_id" "$product_id"
+}
+
+target_lock_path() {
+    local overrides_root="$1"
+    local vendor_id="$2"
+    local product_id="$3"
+
+    [[ "$overrides_root" == /* ]] || return 1
+    [[ "$vendor_id" =~ ^[0-9a-f]+$ && "$product_id" =~ ^[0-9a-f]+$ ]] || return 1
+    printf '%s/.one-key-hidpi-locks/DisplayVendorID-%s-DisplayProductID-%s.lock\n' \
+        "$overrides_root" "$vendor_id" "$product_id"
 }
 
 state_dir_for_display() {
@@ -377,17 +388,19 @@ insert_manifest_payloads() {
 write_manifest() {
     local manifest_path="$1"
     local candidate_path="$2"
-    local target_relative="$3"
-    local target_existed="$4"
-    local vendor_id="$5"
-    local product_id="$6"
-    local native_resolution="$7"
-    local original_hash="$8"
-    local candidate_hash="$9"
+    local overrides_root="$3"
+    local target_relative="$4"
+    local target_existed="$5"
+    local vendor_id="$6"
+    local product_id="$7"
+    local native_resolution="$8"
+    local original_hash="$9"
+    local candidate_hash="${10}"
 
     /usr/bin/plutil -create xml1 "$manifest_path" || return 1
     # shellcheck disable=SC2153
     /usr/bin/plutil -insert manifest-version -integer "$MANIFEST_VERSION" "$manifest_path" || return 1
+    /usr/bin/plutil -insert overrides-root -string "$overrides_root" "$manifest_path" || return 1
     /usr/bin/plutil -insert target-relative-path -string "$target_relative" "$manifest_path" || return 1
     /usr/bin/plutil -insert target-existed -bool "$target_existed" "$manifest_path" || return 1
     /usr/bin/plutil -insert vendor-id -string "$vendor_id" "$manifest_path" || return 1
@@ -471,9 +484,11 @@ read_revert_manifest() {
     local vendor_id="$2"
     local product_id="$3"
     local target_relative="$4"
+    local overrides_root="$5"
     local manifest_version
     local manifest_vendor
     local manifest_product
+    local manifest_overrides_root
     local manifest_relative
     local manifest_native_resolution
     local target_existed
@@ -483,8 +498,10 @@ read_revert_manifest() {
 
     /usr/bin/plutil -lint "$manifest_path" >/dev/null || return 1
     manifest_version="$(/usr/bin/plutil -extract manifest-version raw -expect integer -o - "$manifest_path")" || return 1
+    [[ "$manifest_version" == "$MANIFEST_VERSION" ]] || return 2
     manifest_vendor="$(/usr/bin/plutil -extract vendor-id raw -expect string -o - "$manifest_path")" || return 1
     manifest_product="$(/usr/bin/plutil -extract product-id raw -expect string -o - "$manifest_path")" || return 1
+    manifest_overrides_root="$(/usr/bin/plutil -extract overrides-root raw -expect string -o - "$manifest_path")" || return 1
     manifest_relative="$(/usr/bin/plutil -extract target-relative-path raw -expect string -o - "$manifest_path")" || return 1
     manifest_native_resolution="$(/usr/bin/plutil -extract native-resolution raw -expect string -o - "$manifest_path")" || return 1
     target_existed="$(/usr/bin/plutil -extract target-existed raw -expect bool -o - "$manifest_path")" || return 1
@@ -492,8 +509,8 @@ read_revert_manifest() {
     original_hash="$(/usr/bin/plutil -extract original-sha256 raw -expect string -o - "$manifest_path")" || return 1
     payload_count="$(/usr/bin/plutil -extract payloads raw -expect array -o - "$manifest_path")" || return 1
 
-    [[ "$manifest_version" == "$MANIFEST_VERSION" ]] || return 1
     [[ "$manifest_vendor" == "$vendor_id" && "$manifest_product" == "$product_id" ]] || return 1
+    [[ "$manifest_overrides_root" == "$overrides_root" ]] || return 3
     [[ "$manifest_relative" == "$target_relative" ]] || return 1
     parse_resolution "$manifest_native_resolution" >/dev/null || return 1
     [[ "$target_existed" == true || "$target_existed" == false ]] || return 1
@@ -553,7 +570,7 @@ apply_override() {
     path_has_disallowed_symbolic_link "$target_path" && fail "target path traverses a symbolic link"
     path_has_disallowed_symbolic_link "$state_dir" && fail "state path traverses a symbolic link"
     reset_operation_cleanup_state
-    acquire_display_lock "$state_root" "$vendor_id" "$product_id" || fail "could not acquire display operation lock"
+    acquire_display_lock "$overrides_root" "$vendor_id" "$product_id" || fail "could not acquire display operation lock"
     [[ ! -e "$manifest_path" && ! -e "$original_path" ]] || fail "existing state requires manual inspection before another apply"
     directory_is_empty "$state_dir" || fail "state directory must be empty before apply"
     ensure_directory_path_without_symlinks "$target_dir" || fail "could not create target directory safely"
@@ -580,7 +597,7 @@ apply_override() {
     candidate_hash="$(sha256_file "$candidate_path")" || fail "could not hash candidate override"
     create_temporary_file "$state_dir" "manifest.plist" || fail "could not create manifest candidate"
     manifest_candidate_path="$TEMPORARY_FILE"
-    write_manifest "$manifest_candidate_path" "$candidate_path" "$target_relative" "$target_existed" "$vendor_id" "$product_id" "$native_resolution" "$original_hash" "$candidate_hash" || fail "could not write manifest"
+    write_manifest "$manifest_candidate_path" "$candidate_path" "$overrides_root" "$target_relative" "$target_existed" "$vendor_id" "$product_id" "$native_resolution" "$original_hash" "$candidate_hash" || fail "could not write manifest"
     set_written_file_permissions "$manifest_candidate_path" "$state_is_system_path" || fail "could not set manifest permissions"
     commit_apply_state "$target_path" "$candidate_path" "$target_existed" "$original_hash" "$backup_candidate_path" "$original_path" "$manifest_candidate_path" "$manifest_path" "$state_dir" || fail "apply did not complete; target override was not replaced"
     complete_operation_cleanup || fail "apply completed but could not release display operation lock"
@@ -625,9 +642,23 @@ revert_override() {
     path_has_disallowed_symbolic_link "$target_path" && fail "target path traverses a symbolic link"
     path_has_disallowed_symbolic_link "$state_dir" && fail "state path traverses a symbolic link"
     reset_operation_cleanup_state
-    acquire_display_lock "$state_root" "$vendor_id" "$product_id" || fail "could not acquire display operation lock"
+    acquire_display_lock "$overrides_root" "$vendor_id" "$product_id" || fail "could not acquire display operation lock"
     [[ -f "$manifest_path" ]] || fail "no manifest exists for this target"
-    manifest_metadata="$(read_revert_manifest "$manifest_path" "$vendor_id" "$product_id" "$target_relative")" || fail "manifest is invalid or does not match this display"
+    if manifest_metadata="$(read_revert_manifest "$manifest_path" "$vendor_id" "$product_id" "$target_relative" "$overrides_root")"; then
+        :
+    else
+        case "$?" in
+        2)
+            fail "manifest version is unsupported"
+            ;;
+        3)
+            fail "manifest override root does not match this target"
+            ;;
+        *)
+            fail "manifest is invalid or does not match this display"
+            ;;
+        esac
+    fi
     IFS='|' read -r target_existed candidate_hash original_hash <<< "$manifest_metadata"
     [[ -f "$target_path" ]] || fail "target override is missing; refusing to alter state"
     current_hash="$(sha256_file "$target_path")" || fail "could not hash current target override"
