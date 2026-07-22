@@ -7,6 +7,7 @@ readonly DEFAULT_OVERRIDES_ROOT="/Library/Displays/Contents/Resources/Overrides"
 readonly DEFAULT_STATE_ROOT="/Library/Application Support/one-key-hidpi"
 readonly DEFAULT_FRAMEBUFFER_LIMIT=8192
 readonly MAX_NATIVE_DIMENSION=$((DEFAULT_FRAMEBUFFER_LIMIT / 2))
+# shellcheck disable=SC2034
 readonly MANIFEST_VERSION=1
 readonly PRESET_NAMES=("compact" "balanced" "spacious" "dense" "native")
 readonly PRESET_NUMERATORS=(1 3 2 3 1)
@@ -73,11 +74,21 @@ parse_resolution() {
 normalize_edid() {
     local edid="$1"
     local normalized_edid
+    local checksum=0
+    local index
+    local byte_hex
 
     [[ "$edid" =~ ^[0-9A-Fa-f]+$ ]] || return 1
-    (( ${#edid} >= 144 && ${#edid} % 2 == 0 )) || return 1
+    (( ${#edid} >= 256 && ${#edid} % 256 == 0 )) || return 1
     normalized_edid="$(printf '%s' "$edid" | /usr/bin/tr '[:upper:]' '[:lower:]')"
     [[ "${normalized_edid:0:16}" == "00ffffffffffff00" ]] || return 1
+
+    for ((index = 0; index < 256; index += 2)); do
+        byte_hex="${normalized_edid:index:2}"
+        checksum=$((checksum + 16#$byte_hex))
+    done
+    ((checksum % 256 == 0)) || return 1
+
     printf '%s\n' "$normalized_edid"
 }
 
@@ -105,6 +116,7 @@ hidpi_payload() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || fail "could not resolve script directory"
 readonly SCRIPT_DIR
+# shellcheck source=lib/intel_hidpi_storage.sh
 source "${SCRIPT_DIR}/lib/intel_hidpi_storage.sh" || fail "could not load Intel HiDPI storage helpers"
 
 print_preview_mode() {
@@ -176,20 +188,25 @@ preview() {
 
 display_name_from_edid() {
     local edid="$1"
+    local descriptor_start
+    local descriptor
     local name_hex
     local name
+    local index
 
-    case "$edid" in
-    *000000fc00*)
-        name_hex="${edid#*000000fc00}"
-        name_hex="${name_hex:0:26}"
-        name="$(printf '%s' "$name_hex" | /usr/bin/xxd -r -p 2>/dev/null | /usr/bin/tr -d '\r\n' | /usr/bin/sed 's/[[:space:]]*$//')"
+    for ((index = 0; index < 4; index++)); do
+        descriptor_start=$((108 + (index * 36)))
+        descriptor="${edid:descriptor_start:36}"
+        [[ ${#descriptor} -eq 36 ]] || break
+        [[ "${descriptor:0:10}" == "000000fc00" ]] || continue
+
+        name_hex="${descriptor:10:26}"
+        name="$(printf '%s' "$name_hex" | /usr/bin/xxd -r -p 2>/dev/null | LC_ALL=C /usr/bin/tr -cd '[:print:]' | /usr/bin/sed 's/[[:space:]]*$//')"
         if [[ -n "$name" ]]; then
             printf '%s\n' "$name"
             return 0
         fi
-        ;;
-    esac
+    done
 
     printf '%s\n' "Unknown"
 }
@@ -311,8 +328,8 @@ print_inventory_entry() {
     local override_relative
     local override_path
 
-    vendor_hex="$(printf '%s' "${edid:16:4}" | /usr/bin/tr '[:upper:]' '[:lower:]')"
-    product_hex="$(printf '%s%s' "${edid:22:2}" "${edid:20:2}" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+    vendor_hex="$(normalize_hex_id "${edid:16:4}")" || return 1
+    product_hex="$(normalize_hex_id "${edid:22:2}${edid:20:2}")" || return 1
     vendor_decimal="$(decimal_from_hex "$vendor_hex")" || return 1
     product_decimal="$(decimal_from_hex "$product_hex")" || return 1
     display_name="$(display_name_from_edid "$edid")"
@@ -326,9 +343,12 @@ print_inventory_entry() {
     printf '  product-id=0x%s (%s)\n' "$product_hex" "$product_decimal"
     printf '  native-resolution=%s\n' "$native_resolution"
 
-    if [[ -f "$override_path" ]]; then
+    if [[ -f "$override_path" ]] && /usr/bin/plutil -lint "$override_path" >/dev/null 2>&1; then
         printf '  override=%s (present)\n' "$override_relative"
         print_override_modes "$override_path"
+    elif [[ -f "$override_path" ]]; then
+        printf '  override=%s (invalid)\n' "$override_relative"
+        printf '  scale-resolutions=unavailable\n'
     else
         printf '  override=%s (absent)\n' "$override_relative"
         printf '  scale-resolutions=none\n'
