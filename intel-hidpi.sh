@@ -4,15 +4,21 @@ set -u
 set -o pipefail
 
 readonly DEFAULT_OVERRIDES_ROOT="/Library/Displays/Contents/Resources/Overrides"
+readonly DEFAULT_FRAMEBUFFER_LIMIT=8192
+readonly PRESET_NAMES=("compact" "balanced" "spacious" "dense" "native")
+readonly PRESET_NUMERATORS=(1 3 2 3 1)
+readonly PRESET_DENOMINATORS=(2 5 3 4 1)
 
 usage() {
     cat <<'EOF'
 Usage:
   intel-hidpi.sh inventory [--ioreg-file PATH] [--overrides-root PATH]
+  intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS]
 
 Commands:
   inventory  Read connected Intel-compatible external display metadata and
              existing EDID override modes. This command never writes files.
+  preview    Generate candidate 2x HiDPI modes without writing an override.
 EOF
 }
 
@@ -26,6 +32,106 @@ decimal_from_hex() {
 
     [[ "$value" =~ ^[0-9A-Fa-f]+$ ]] || return 1
     printf '%d\n' "$((16#$value))"
+}
+
+parse_resolution() {
+    local resolution="$1"
+    local width
+    local height
+
+    [[ "$resolution" =~ ^([1-9][0-9]*)x([1-9][0-9]*)$ ]] || return 1
+    width="${BASH_REMATCH[1]}"
+    height="${BASH_REMATCH[2]}"
+    printf '%s:%s\n' "$width" "$height"
+}
+
+scale_dimension_to_even() {
+    local input_dimension="$1"
+    local numerator="$2"
+    local denominator="$3"
+    local scaled_dimension
+
+    scaled_dimension=$(((input_dimension * numerator + denominator / 2) / denominator))
+    scaled_dimension=$((scaled_dimension - scaled_dimension % 2))
+    ((scaled_dimension > 0)) || return 1
+    printf '%s\n' "$scaled_dimension"
+}
+
+hidpi_payload() {
+    local framebuffer_width="$1"
+    local framebuffer_height="$2"
+
+    printf '%08x%08x0000000100200000' "$framebuffer_width" "$framebuffer_height" |
+        /usr/bin/xxd -r -p |
+        /usr/bin/base64 |
+        /usr/bin/tr -d '\n'
+}
+
+print_preview_mode() {
+    local name="$1"
+    local native_width="$2"
+    local native_height="$3"
+    local numerator="$4"
+    local denominator="$5"
+    local framebuffer_limit="$6"
+    local logical_width
+    local logical_height
+    local framebuffer_width
+    local framebuffer_height
+    local payload
+
+    logical_width="$(scale_dimension_to_even "$native_width" "$numerator" "$denominator")" || return 1
+    logical_height="$(scale_dimension_to_even "$native_height" "$numerator" "$denominator")" || return 1
+    framebuffer_width=$((logical_width * 2))
+    framebuffer_height=$((logical_height * 2))
+
+    if ((framebuffer_width > framebuffer_limit || framebuffer_height > framebuffer_limit)); then
+        fail "${name} mode framebuffer ${framebuffer_width}x${framebuffer_height} exceeds ${framebuffer_limit}x${framebuffer_limit}"
+    fi
+
+    payload="$(hidpi_payload "$framebuffer_width" "$framebuffer_height")" || return 1
+    printf '%s: %sx%s framebuffer=%sx%s payload=%s\n' \
+        "$name" "$logical_width" "$logical_height" "$framebuffer_width" "$framebuffer_height" "$payload"
+}
+
+preview() {
+    local native_resolution="$1"
+    local framebuffer_limit="$2"
+    local parsed_resolution
+    local native_width
+    local native_height
+    local index
+    local previous_mode=""
+    local output
+    local logical_resolution
+    local outputs=()
+
+    [[ "$framebuffer_limit" =~ ^[1-9][0-9]*$ ]] || fail "framebuffer limit must be a positive integer"
+    parsed_resolution="$(parse_resolution "$native_resolution")" || fail "native resolution must use positive WIDTHxHEIGHT values"
+    native_width="${parsed_resolution%%:*}"
+    native_height="${parsed_resolution##*:}"
+
+    for ((index = 0; index < ${#PRESET_NAMES[@]}; index++)); do
+        output="$(print_preview_mode \
+            "${PRESET_NAMES[$index]}" \
+            "$native_width" \
+            "$native_height" \
+            "${PRESET_NUMERATORS[$index]}" \
+            "${PRESET_DENOMINATORS[$index]}" \
+            "$framebuffer_limit")" || return 1
+        logical_resolution="${output#*: }"
+        logical_resolution="${logical_resolution%% framebuffer=*}"
+
+        if [[ "$logical_resolution" == "$previous_mode" ]]; then
+            continue
+        fi
+        previous_mode="$logical_resolution"
+        outputs+=("$output")
+    done
+
+    for output in "${outputs[@]}"; do
+        printf '%s\n' "$output"
+    done
 }
 
 display_name_from_edid() {
@@ -219,9 +325,14 @@ main() {
     local command="${1:-}"
     local ioreg_file=""
     local overrides_root="$DEFAULT_OVERRIDES_ROOT"
+    local native_resolution=""
+    local framebuffer_limit="$DEFAULT_FRAMEBUFFER_LIMIT"
 
     case "$command" in
     inventory)
+        shift
+        ;;
+    preview)
         shift
         ;;
     -h|--help|help|"")
@@ -234,25 +345,49 @@ main() {
         ;;
     esac
 
-    while (($# > 0)); do
-        case "$1" in
-        --ioreg-file)
-            (($# >= 2)) || fail "--ioreg-file requires a path"
-            ioreg_file="$2"
-            shift 2
-            ;;
-        --overrides-root)
-            (($# >= 2)) || fail "--overrides-root requires a path"
-            overrides_root="$2"
-            shift 2
-            ;;
-        *)
-            fail "unknown inventory option: $1"
-            ;;
-        esac
-    done
-
-    inventory "$ioreg_file" "$overrides_root"
+    case "$command" in
+    inventory)
+        while (($# > 0)); do
+            case "$1" in
+            --ioreg-file)
+                (($# >= 2)) || fail "--ioreg-file requires a path"
+                ioreg_file="$2"
+                shift 2
+                ;;
+            --overrides-root)
+                (($# >= 2)) || fail "--overrides-root requires a path"
+                overrides_root="$2"
+                shift 2
+                ;;
+            *)
+                fail "unknown inventory option: $1"
+                ;;
+            esac
+        done
+        inventory "$ioreg_file" "$overrides_root"
+        ;;
+    preview)
+        while (($# > 0)); do
+            case "$1" in
+            --native-resolution)
+                (($# >= 2)) || fail "--native-resolution requires WIDTHxHEIGHT"
+                native_resolution="$2"
+                shift 2
+                ;;
+            --framebuffer-limit)
+                (($# >= 2)) || fail "--framebuffer-limit requires a positive integer"
+                framebuffer_limit="$2"
+                shift 2
+                ;;
+            *)
+                fail "unknown preview option: $1"
+                ;;
+            esac
+        done
+        [[ -n "$native_resolution" ]] || fail "--native-resolution is required"
+        preview "$native_resolution" "$framebuffer_limit"
+        ;;
+    esac
 }
 
 main "$@"
