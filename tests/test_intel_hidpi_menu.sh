@@ -33,6 +33,10 @@ assert_file_absent() {
     [[ ! -e "$1" && ! -L "$1" ]] || fail "unexpected file: $1"
 }
 
+assert_file_exists() {
+    [[ -f "$1" ]] || fail "expected file: $1"
+}
+
 first_edid="$(/usr/bin/sed -n 's/.*"IODisplayEDID" = <\([0-9A-Fa-f][0-9A-Fa-f]*\)>.*/\1/p' "${fixture_dir}/ioreg-displays.txt" | /usr/bin/sed -n '1p')"
 
 menu_preview_output="$(\
@@ -64,10 +68,14 @@ entrypoint_trace="$(mktemp "${TMPDIR:-/tmp}/one-key-hidpi-menu.XXXXXX")"
 standalone_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-standalone.XXXXXX")"
 standalone_script="${standalone_dir}/hidpi.sh"
 remote_source_marker="${standalone_dir}/remote-source-marker"
+legacy_disable_root="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-legacy-disable.XXXXXX")"
+legacy_restore_home="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-legacy-restore.XXXXXX")"
 
 cleanup() {
     /bin/rm -f "$entrypoint_trace"
     /bin/rm -rf "$standalone_dir"
+    /bin/rm -rf "$legacy_disable_root"
+    /bin/rm -rf "$legacy_restore_home"
 }
 
 trap cleanup EXIT
@@ -136,6 +144,65 @@ assert_legacy_dispatch() {
 assert_legacy_dispatch 1 $'init\nenable'
 assert_legacy_dispatch 2 $'init\npatch'
 assert_legacy_dispatch 3 $'init\ndisable'
+
+legacy_current_target="${legacy_disable_root}/DisplayVendorID-30ae/DisplayProductID-62a5"
+legacy_sibling_target="${legacy_disable_root}/DisplayVendorID-30ae/DisplayProductID-7777"
+legacy_current_icon="${legacy_current_target}.icns"
+legacy_current_tiff="${legacy_current_target}.tiff"
+legacy_sibling_icon="${legacy_sibling_target}.icns"
+/bin/mkdir -p "$(/usr/bin/dirname "$legacy_current_target")" || fail "could not create legacy override fixture"
+printf 'current override\n' > "$legacy_current_target"
+printf 'sibling override\n' > "$legacy_sibling_target"
+printf 'current icon\n' > "$legacy_current_icon"
+printf 'current tiff\n' > "$legacy_current_tiff"
+printf 'sibling icon\n' > "$legacy_sibling_icon"
+
+if ! /bin/bash -c '
+    source "$1"
+    targetDir="$2"
+    Vid=30ae
+    Pid=62a5
+    langDisableOpt1="(1) Disable HIDPI on this monitor"
+    langDisableOpt2="(2) Reset all settings to macOS default"
+    langInputChoice="Enter your choice"
+    langDisabled="HIDPI Disabled"
+    sudo() {
+        "$@"
+    }
+    printf "1\n" | disable
+' bash "$repo_dir/hidpi.sh" "$legacy_disable_root" >/dev/null; then
+    fail "legacy single-display disable should succeed in the fixture root"
+fi
+
+assert_file_absent "$legacy_current_target"
+assert_file_absent "$legacy_current_icon"
+assert_file_absent "$legacy_current_tiff"
+assert_file_exists "$legacy_sibling_target"
+assert_file_exists "$legacy_sibling_icon"
+
+if ! HOME="$legacy_restore_home" /bin/bash -c '
+    source "$1"
+    is_applesilicon=false
+    generate_restore_cmd
+' bash "$repo_dir/hidpi.sh"; then
+    fail "legacy restore-script generation should succeed"
+fi
+
+legacy_restore_script="${legacy_restore_home}/.hidpi-disable"
+assert_file_exists "$legacy_restore_script"
+legacy_restore_contents="$(/bin/cat "$legacy_restore_script")" || fail "could not read legacy restore script"
+assert_contains "$legacy_restore_contents" "rm -f \"\${restorePath}/DisplayVendorID-\${Vid}/DisplayProductID-\${Pid}\""
+assert_contains "$legacy_restore_contents" "\"\${restorePath}/DisplayVendorID-\${Vid}/DisplayProductID-\${Pid}.icns\""
+assert_contains "$legacy_restore_contents" "\"\${restorePath}/DisplayVendorID-\${Vid}/DisplayProductID-\${Pid}.tiff\""
+assert_not_contains "$legacy_restore_contents" "rm -rf \"\${restorePath}/DisplayVendorID-\${Vid}\""
+
+readme_zh_contents="$(/bin/cat "${repo_dir}/README-zh.md")" || fail "could not read Chinese README"
+assert_contains "$readme_zh_contents" "sudo ./intel-hidpi.sh revert"
+assert_not_contains "$readme_zh_contents" "rm -rf /Volumes/你的系统盘/Library/Displays/Contents/Resources/Overrides"
+
+readme_en_contents="$(/bin/cat "${repo_dir}/README.md")" || fail "could not read English README"
+assert_contains "$readme_en_contents" "sudo ./intel-hidpi.sh revert"
+assert_not_contains "$readme_en_contents" 'rm -rf /Volumes/"Your System Disk Part"/Library/Displays/Contents/Resources/Overrides'
 
 /bin/cp "$repo_dir/hidpi.sh" "$standalone_script" || fail "could not create standalone hidpi script"
 /bin/chmod +x "$standalone_script" || fail "could not mark standalone hidpi script executable"

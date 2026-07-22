@@ -44,7 +44,21 @@ required before macOS exposes changed override modes.
 
 ### Normal
 
-Still running the script in the terminal, but choose option 3
+In the legacy menu, choose option 3 and then "Disable HIDPI on this monitor".
+That path removes only the selected display's `DisplayProductID-<product ID>`
+override and its icon attachments, and keeps other displays from the same
+vendor.
+
+For the `Intel safe HiDPI` menu in a complete local checkout, rerun the local
+script as root and choose Revert, or run this from the checkout:
+
+```bash
+sudo ./intel-hidpi.sh revert --vendor-id <vendor-id> --product-id <product-id> --confirm
+```
+
+The command reverts only the override recorded by this tool for that display.
+It stops explicitly when the manifest is missing, the target changed outside
+the tool, or the override root does not match.
 
 ### Recovery mode
 
@@ -74,14 +88,14 @@ cd "user name"
 ./.hidpi-disable
 ```
 
-2. 
+2.
 
-Remove all injected display's DisplayVendorID folder under `Library/Displays/Contents/Resources/Overrides`
-
-```bash
-ls /Volumes/
-rm -rf /Volumes/"Your System Disk Part"/Library/Displays/Contents/Resources/Overrides
-```
+Do not recursively remove the entire
+`Library/Displays/Contents/Resources/Overrides` directory. It can contain
+other display and system configuration. If Intel safe rollback cannot run,
+preserve the manifest and target file, then identify the single
+`DisplayProductID-<product ID>` file for the selected display before manual
+recovery.
 
 ## Inspired
 

@@ -44,7 +44,18 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/xzhih/one-key-hidpi/mast
 
 ### 命令恢复
 
-如果还能进系统，就再次运行命令选择选项 3 关闭 HIDPI。
+传统菜单的选项 3 中，选择“在此显示器上禁用 HIDPI”只会删除当前选中显示器的
+`DisplayProductID-<产品 ID>` override 及其图标附件，并保留同厂商的其他显示器配置。
+
+如果使用的是完整本地仓库中的 `Intel 安全 HiDPI` 菜单，请以 root 身份重新运行
+本地脚本，选择 Intel 安全菜单中的 Revert；也可以在仓库目录执行：
+
+```bash
+sudo ./intel-hidpi.sh revert --vendor-id <供应商ID> --product-id <产品ID> --confirm
+```
+
+该命令只会回退本工具为该显示器记录的 manifest 所对应的 override；manifest 缺失、
+目标已被外部修改或 override 根不匹配时会显式停止，不会删除其他显示器配置。
 
 ### 恢复模式
 
@@ -77,14 +88,9 @@ cd 你的用户名
 
 2. 手动恢复
 
-使用终端删除 `Library/Displays/Contents/Resources/Overrides` 下删除所有通过外部注入的显示器配置文件夹
-
-具体命令如下：
-
-```bash
-ls /Volumes/
-rm -rf /Volumes/你的系统盘/Library/Displays/Contents/Resources/Overrides
-```
+不要递归删除整个 `Library/Displays/Contents/Resources/Overrides` 目录。该目录可能包含
+其他显示器或系统配置。若 Intel 安全回退无法执行，请保留 manifest 和目标文件，并先
+根据上面的显示器 vendor/product ID 确认需要恢复的单个 `DisplayProductID-<产品 ID>` 文件。
 
 ## 从以下得到启发
 

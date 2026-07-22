@@ -545,8 +545,10 @@ case ${input} in
     if [[ -f "${restorePath}/Icons.plist" ]]; then
         ${rootPath}/usr/libexec/plistbuddy -c "Delete :vendors:${Vid}:products:${Pid}" "${restorePath}/Icons.plist"
     fi
-    if [[ -d "${restorePath}/DisplayVendorID-${Vid}" ]]; then
-        rm -rf "${restorePath}/DisplayVendorID-${Vid}"
+    if [[ -f "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" ]]; then
+        rm -f "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" \
+            "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" \
+            "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff"
     fi
     ;;
 2)
@@ -867,8 +869,10 @@ function disable() {
         if [[ -f "${targetDir}/Icons.plist" ]]; then
             sudo /usr/libexec/plistbuddy -c "Delete :vendors:${Vid}:products:${Pid}" "${targetDir}/Icons.plist"
         fi
-        if [[ -d "${targetDir}/DisplayVendorID-${Vid}" ]]; then
-            sudo rm -rf "${targetDir}/DisplayVendorID-${Vid}"
+        if [[ -f "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" ]]; then
+            sudo rm -f "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" \
+                "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" \
+                "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff"
         fi
         ;;
     2)
