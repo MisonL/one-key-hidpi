@@ -1,0 +1,1 @@
+No IODisplayEDID entries are present in this fixture.
