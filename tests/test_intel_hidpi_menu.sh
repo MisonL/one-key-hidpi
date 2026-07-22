@@ -180,6 +180,49 @@ assert_file_absent "$legacy_current_tiff"
 assert_file_exists "$legacy_sibling_target"
 assert_file_exists "$legacy_sibling_icon"
 
+printf 'orphan icon\n' > "$legacy_current_icon"
+printf 'orphan tiff\n' > "$legacy_current_tiff"
+if ! /bin/bash -c '
+    source "$1"
+    targetDir="$2"
+    Vid=30ae
+    Pid=62a5
+    langDisableOpt1="(1) Disable HIDPI on this monitor"
+    langDisableOpt2="(2) Reset all settings to macOS default"
+    langInputChoice="Enter your choice"
+    langDisabled="HIDPI Disabled"
+    sudo() {
+        "$@"
+    }
+    printf "1\n" | disable
+' bash "$repo_dir/hidpi.sh" "$legacy_disable_root" >/dev/null; then
+    fail "legacy single-display disable should remove orphan attachments"
+fi
+assert_file_absent "$legacy_current_icon"
+assert_file_absent "$legacy_current_tiff"
+
+legacy_external_attachment="${legacy_disable_root}/outside-attachment"
+printf 'outside attachment\n' > "$legacy_external_attachment"
+/bin/ln -s "$legacy_external_attachment" "$legacy_current_icon" || fail "could not create direct-disable attachment link"
+if ! /bin/bash -c '
+    source "$1"
+    targetDir="$2"
+    Vid=30ae
+    Pid=62a5
+    langDisableOpt1="(1) Disable HIDPI on this monitor"
+    langDisableOpt2="(2) Reset all settings to macOS default"
+    langInputChoice="Enter your choice"
+    langDisabled="HIDPI Disabled"
+    sudo() {
+        "$@"
+    }
+    printf "1\n" | disable
+' bash "$repo_dir/hidpi.sh" "$legacy_disable_root" >/dev/null; then
+    fail "legacy single-display disable should remove an attachment symbolic link"
+fi
+assert_file_absent "$legacy_current_icon"
+assert_file_exists "$legacy_external_attachment"
+
 if ! HOME="$legacy_restore_home" /bin/bash -c '
     source "$1"
     is_applesilicon=false
@@ -195,6 +238,70 @@ assert_contains "$legacy_restore_contents" "rm -f \"\${restorePath}/DisplayVendo
 assert_contains "$legacy_restore_contents" "\"\${restorePath}/DisplayVendorID-\${Vid}/DisplayProductID-\${Pid}.icns\""
 assert_contains "$legacy_restore_contents" "\"\${restorePath}/DisplayVendorID-\${Vid}/DisplayProductID-\${Pid}.tiff\""
 assert_not_contains "$legacy_restore_contents" "rm -rf \"\${restorePath}/DisplayVendorID-\${Vid}\""
+
+legacy_restore_run_dir="${legacy_restore_home}/Users/tester"
+legacy_restore_target_dir="${legacy_restore_home}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+legacy_restore_target="${legacy_restore_target_dir}/DisplayProductID-62a5"
+legacy_restore_icon="${legacy_restore_target}.icns"
+legacy_restore_tiff="${legacy_restore_target}.tiff"
+legacy_restore_sibling="${legacy_restore_target_dir}/DisplayProductID-7777"
+/bin/mkdir -p "$legacy_restore_run_dir" "$legacy_restore_target_dir" || fail "could not create restore-script fixture"
+printf 'restore target\n' > "$legacy_restore_target"
+printf 'restore icon\n' > "$legacy_restore_icon"
+printf 'restore tiff\n' > "$legacy_restore_tiff"
+printf 'restore sibling\n' > "$legacy_restore_sibling"
+if ! (
+    cd "$legacy_restore_run_dir" || exit 1
+    printf "1\n" | /bin/bash -c '
+        selected_edid="$2"
+        ioreg() {
+            printf "    | | \\"IODisplayEDID\\" = <%s>\\n" "$selected_edid"
+        }
+        source "$1"
+    ' bash "$legacy_restore_script" "$first_edid"
+); then
+    fail "generated legacy restore script should remove the selected display"
+fi
+assert_file_absent "$legacy_restore_target"
+assert_file_absent "$legacy_restore_icon"
+assert_file_absent "$legacy_restore_tiff"
+assert_file_exists "$legacy_restore_sibling"
+
+printf 'orphan restore icon\n' > "$legacy_restore_icon"
+printf 'orphan restore tiff\n' > "$legacy_restore_tiff"
+if ! (
+    cd "$legacy_restore_run_dir" || exit 1
+    printf "1\n" | /bin/bash -c '
+        selected_edid="$2"
+        ioreg() {
+            printf "    | | \\"IODisplayEDID\\" = <%s>\\n" "$selected_edid"
+        }
+        source "$1"
+    ' bash "$legacy_restore_script" "$first_edid"
+); then
+    fail "generated legacy restore script should remove orphan attachments"
+fi
+assert_file_absent "$legacy_restore_icon"
+assert_file_absent "$legacy_restore_tiff"
+assert_file_exists "$legacy_restore_sibling"
+
+legacy_restore_external_attachment="${legacy_restore_home}/outside-attachment"
+printf 'restore outside attachment\n' > "$legacy_restore_external_attachment"
+/bin/ln -s "$legacy_restore_external_attachment" "$legacy_restore_icon" || fail "could not create restore attachment link"
+if ! (
+    cd "$legacy_restore_run_dir" || exit 1
+    printf "1\n" | /bin/bash -c '
+        selected_edid="$2"
+        ioreg() {
+            printf "    | | \\"IODisplayEDID\\" = <%s>\\n" "$selected_edid"
+        }
+        source "$1"
+    ' bash "$legacy_restore_script" "$first_edid"
+); then
+    fail "generated legacy restore script should remove an attachment symbolic link"
+fi
+assert_file_absent "$legacy_restore_icon"
+assert_file_exists "$legacy_restore_external_attachment"
 
 readme_zh_contents="$(/bin/cat "${repo_dir}/README-zh.md")" || fail "could not read Chinese README"
 assert_contains "$readme_zh_contents" "sudo ./intel-hidpi.sh revert"

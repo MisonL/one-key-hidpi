@@ -545,7 +545,9 @@ case ${input} in
     if [[ -f "${restorePath}/Icons.plist" ]]; then
         ${rootPath}/usr/libexec/plistbuddy -c "Delete :vendors:${Vid}:products:${Pid}" "${restorePath}/Icons.plist"
     fi
-    if [[ -f "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" ]]; then
+    if [[ -e "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" || -L "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" || \
+        -e "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" || -L "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" || \
+        -e "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff" || -L "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff" ]]; then
         rm -f "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" \
             "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" \
             "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff"
@@ -869,7 +871,9 @@ function disable() {
         if [[ -f "${targetDir}/Icons.plist" ]]; then
             sudo /usr/libexec/plistbuddy -c "Delete :vendors:${Vid}:products:${Pid}" "${targetDir}/Icons.plist"
         fi
-        if [[ -f "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" ]]; then
+        if [[ -e "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" || -L "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" || \
+            -e "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" || -L "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" || \
+            -e "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff" || -L "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff" ]]; then
             sudo rm -f "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" \
                 "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" \
                 "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff"
