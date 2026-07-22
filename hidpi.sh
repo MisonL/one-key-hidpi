@@ -11,7 +11,11 @@ cat <<EEF
 ============================================
 EEF
 
-currentDir="$(cd $(dirname -- $0) && pwd)"
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    currentDir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    currentDir="$(pwd)"
+fi
 systemLanguage=($(locale | grep LANG | sed s/'LANG='// | tr -d '"' | cut -d "." -f 1))
 is_applesilicon=$([[ "$(uname -m)" == "arm64" ]] && echo true || echo false)
 
@@ -149,10 +153,18 @@ elif [[ "${systemLanguage}" == "uk_UA" ]]; then
     langMonitVIDPID="ID Виробника:ID пристрою твого монітора:"
 fi
 
-source "${currentDir}/lib/intel_hidpi_menu.sh" || {
-    echo "Could not load Intel safe HiDPI menu"
-    exit 1
-}
+intelSafeHidpiAvailable=false
+intelSafeHidpiTool="${currentDir}/intel-hidpi.sh"
+intelSafeHidpiMenu="${currentDir}/lib/intel_hidpi_menu.sh"
+
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "$intelSafeHidpiTool" && -f "$intelSafeHidpiMenu" ]]; then
+    # shellcheck source=lib/intel_hidpi_menu.sh
+    source "$intelSafeHidpiMenu" || {
+        echo "Could not load Intel safe HiDPI menu"
+        exit 1
+    }
+    intelSafeHidpiAvailable=true
+fi
 
 function get_edid() {
     local index=0
@@ -881,7 +893,7 @@ function start() {
         let opt++; printf "${langEnableHIDPIEDID}\n" $opt
     fi
     let opt++; printf "${langDisableHIDPI}\n" $opt
-    if [[ $is_applesilicon == false ]]; then
+    if [[ $is_applesilicon == false && $intelSafeHidpiAvailable == true ]]; then
         let opt++; printf "${langIntelSafeHIDPI}\n" $opt
     fi
     echo ""
@@ -917,7 +929,11 @@ function start() {
             disable
             ;;
         4)
-            intel_safe_hidpi "${currentDir}/intel-hidpi.sh" "$EDID" "$Vid" "$Pid"
+            [[ $intelSafeHidpiAvailable == true ]] || {
+                echo "$langEnterError"
+                exit 1
+            }
+            intel_safe_hidpi "$intelSafeHidpiTool" "$EDID" "$Vid" "$Pid"
             ;;
         *)
             echo "${langEnterError}"
@@ -927,6 +943,6 @@ function start() {
     fi
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" == "$0" ]]; then
     start
 fi

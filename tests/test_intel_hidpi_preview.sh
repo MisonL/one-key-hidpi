@@ -71,4 +71,13 @@ if "${repo_dir}/intel-hidpi.sh" preview --native-resolution 1x1080 >/dev/null 2>
     fail "odd or non-positive generated dimensions must fail explicitly"
 fi
 
+overflow_resolution="18446744073709555456x18446744073709553776"
+if "${repo_dir}/intel-hidpi.sh" preview --native-resolution "$overflow_resolution" >/dev/null 2>&1; then
+    fail "overflowing native resolution must fail explicitly"
+fi
+
+if "${repo_dir}/intel-hidpi.sh" preview --native-resolution 1920x1080 --framebuffer-limit 18446744073709551616 >/dev/null 2>&1; then
+    fail "overflowing framebuffer limit must fail explicitly"
+fi
+
 printf 'PASS: Intel HiDPI preview\n'

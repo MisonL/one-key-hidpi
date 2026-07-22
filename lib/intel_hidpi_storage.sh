@@ -1,5 +1,7 @@
 TEMPORARY_FILES=("")
 TEMPORARY_FILE=""
+CREATED_DIRECTORIES=("")
+OPERATION_LOCK_PATH=""
 
 cleanup_temporary_files() {
     local temporary_file
@@ -10,7 +12,174 @@ cleanup_temporary_files() {
     done
 }
 
-trap cleanup_temporary_files EXIT
+cleanup_created_directories() {
+    local index
+    local directory
+
+    for ((index = ${#CREATED_DIRECTORIES[@]} - 1; index >= 0; index--)); do
+        directory="${CREATED_DIRECTORIES[$index]}"
+        [[ -n "$directory" && -d "$directory" && ! -L "$directory" ]] || continue
+        /bin/rmdir "$directory" 2>/dev/null || true
+    done
+}
+
+release_display_lock() {
+    local lock_owner
+
+    [[ -n "$OPERATION_LOCK_PATH" ]] || return 0
+    if [[ -L "$OPERATION_LOCK_PATH" ]]; then
+        return 1
+    fi
+    if [[ -f "$OPERATION_LOCK_PATH" ]]; then
+        lock_owner="$(/bin/cat "$OPERATION_LOCK_PATH" 2>/dev/null)" || return 1
+        [[ "$lock_owner" == "$$" ]] || return 1
+        /bin/rm -f "$OPERATION_LOCK_PATH" || return 1
+    fi
+    OPERATION_LOCK_PATH=""
+}
+
+cleanup_runtime_artifacts() {
+    release_display_lock >/dev/null 2>&1 || true
+    cleanup_temporary_files
+    cleanup_created_directories
+}
+
+trap cleanup_runtime_artifacts EXIT
+
+normalize_lexical_path() {
+    local input_path="$1"
+    local absolute_path
+    local current_directory
+    local component
+    local normalized_path=""
+    local -a input_components=("")
+
+    [[ -n "$input_path" && "$input_path" != *$'\n'* && "$input_path" != *$'\r'* ]] || return 1
+    if [[ "$input_path" == /* ]]; then
+        absolute_path="$input_path"
+    else
+        current_directory="$(/bin/pwd -P)" || return 1
+        absolute_path="${current_directory}/${input_path}"
+    fi
+
+    IFS='/' read -r -a input_components <<< "$absolute_path"
+    for component in "${input_components[@]}"; do
+        case "$component" in
+        ""|.)
+            ;;
+        ..)
+            [[ -n "$normalized_path" ]] || return 1
+            normalized_path="${normalized_path%/*}"
+            ;;
+        *)
+            [[ "$component" != *$'\n'* && "$component" != *$'\r'* ]] || return 1
+            normalized_path="${normalized_path}/${component}"
+            ;;
+        esac
+    done
+
+    if [[ -z "$normalized_path" ]]; then
+        printf '/\n'
+        return 0
+    fi
+    printf '%s\n' "$normalized_path"
+}
+
+path_has_disallowed_symbolic_link() {
+    local path="$1"
+    local component
+    local current_path=""
+    local -a components
+
+    IFS='/' read -r -a components <<< "$path"
+    for component in "${components[@]}"; do
+        [[ -n "$component" ]] || continue
+        current_path="${current_path}/${component}"
+        [[ -L "$current_path" ]] || continue
+        case "$current_path" in
+        /tmp|/var)
+            ;;
+        *)
+            return 0
+            ;;
+        esac
+    done
+    return 1
+}
+
+normalize_storage_root() {
+    local input_path="$1"
+    local lexical_path
+    local existing_path
+    local component
+    local resolved_path
+    local -a missing_components=("")
+
+    lexical_path="$(normalize_lexical_path "$input_path")" || return 1
+    case "$lexical_path" in
+    /tmp|/tmp/*)
+        lexical_path="/private${lexical_path}"
+        ;;
+    /var|/var/*)
+        lexical_path="/private${lexical_path}"
+        ;;
+    esac
+    path_has_disallowed_symbolic_link "$lexical_path" && return 1
+    existing_path="$lexical_path"
+
+    while [[ ! -e "$existing_path" ]]; do
+        [[ "$existing_path" != "/" ]] || return 1
+        component="${existing_path##*/}"
+        missing_components=("$component" "${missing_components[@]}")
+        existing_path="${existing_path%/*}"
+        [[ -n "$existing_path" ]] || existing_path="/"
+    done
+
+    [[ -d "$existing_path" && ! -L "$existing_path" ]] || return 1
+    resolved_path="$(/bin/realpath "$existing_path")" || return 1
+    for component in "${missing_components[@]}"; do
+        [[ -n "$component" ]] || continue
+        resolved_path="${resolved_path%/}/${component}"
+    done
+    printf '%s\n' "$resolved_path"
+}
+
+ensure_directory_path_without_symlinks() {
+    local path="$1"
+    local component
+    local current_path=""
+    local -a components=("")
+
+    [[ "$path" == /* ]] || return 1
+    IFS='/' read -r -a components <<< "$path"
+    for component in "${components[@]}"; do
+        [[ -n "$component" ]] || continue
+        current_path="${current_path}/${component}"
+        [[ ! -L "$current_path" ]] || return 1
+        if [[ -e "$current_path" ]]; then
+            [[ -d "$current_path" ]] || return 1
+            continue
+        fi
+        /bin/mkdir "$current_path" || return 1
+        [[ -d "$current_path" && ! -L "$current_path" ]] || return 1
+        CREATED_DIRECTORIES+=("$current_path")
+    done
+}
+
+acquire_display_lock() {
+    local state_root="$1"
+    local vendor_id="$2"
+    local product_id="$3"
+    local locks_directory
+    local lock_path
+
+    locks_directory="${state_root}/.locks"
+    ensure_directory_path_without_symlinks "$locks_directory" || return 1
+    lock_path="${locks_directory}/DisplayVendorID-${vendor_id}-DisplayProductID-${product_id}.lock"
+    [[ ! -L "$lock_path" ]] || return 1
+    /usr/bin/shlock -f "$lock_path" -p "$$" >/dev/null 2>&1 || return 1
+    OPERATION_LOCK_PATH="$lock_path"
+}
 
 normalize_hex_id() {
     local value="$1"
@@ -72,9 +241,38 @@ require_root_for_system_paths() {
     local overrides_root="$1"
     local state_root="$2"
 
-    if [[ "$overrides_root" == "$DEFAULT_OVERRIDES_ROOT" || "$state_root" == "$DEFAULT_STATE_ROOT" ]]; then
+    if is_system_overrides_root "$overrides_root" || is_system_state_root "$state_root"; then
         ((EUID == 0)) || fail "writing default system paths requires root; rerun explicitly with sudo"
     fi
+}
+
+is_system_overrides_root() {
+    local path="$1"
+
+    [[ "$path" == "$DEFAULT_OVERRIDES_ROOT" || "$path" == "/System/Volumes/Data${DEFAULT_OVERRIDES_ROOT}" ]]
+}
+
+is_system_state_root() {
+    local path="$1"
+
+    [[ "$path" == "$DEFAULT_STATE_ROOT" || "$path" == "/System/Volumes/Data${DEFAULT_STATE_ROOT}" ]]
+}
+
+reset_operation_cleanup_state() {
+    TEMPORARY_FILES=("")
+    TEMPORARY_FILE=""
+    CREATED_DIRECTORIES=("")
+    OPERATION_LOCK_PATH=""
+}
+
+complete_operation_cleanup() {
+    local cleanup_status=0
+
+    release_display_lock || cleanup_status=1
+    cleanup_temporary_files
+    cleanup_created_directories
+    reset_operation_cleanup_state
+    return "$cleanup_status"
 }
 
 set_written_file_permissions() {
@@ -339,9 +537,11 @@ apply_override() {
     [[ "$confirmed" == true ]] || fail "apply requires --confirm"
     apply_request="$(parse_apply_request "$vendor_id" "$product_id" "$native_resolution")" || fail "vendor id, product id, or native resolution is invalid"
     IFS='|' read -r vendor_id product_id vendor_decimal product_decimal <<< "$apply_request"
+    overrides_root="$(normalize_storage_root "$overrides_root")" || fail "overrides root is invalid or traverses a symbolic link"
+    state_root="$(normalize_storage_root "$state_root")" || fail "state root is invalid or traverses a symbolic link"
     require_root_for_system_paths "$overrides_root" "$state_root"
-    [[ "$overrides_root" == "$DEFAULT_OVERRIDES_ROOT" ]] && overrides_are_system_paths=true
-    [[ "$state_root" == "$DEFAULT_STATE_ROOT" ]] && state_is_system_path=true
+    is_system_overrides_root "$overrides_root" && overrides_are_system_paths=true
+    is_system_state_root "$state_root" && state_is_system_path=true
 
     target_path="$(path_for_display "$overrides_root" "$vendor_id" "$product_id")"
     target_relative="DisplayVendorID-${vendor_id}/DisplayProductID-${product_id}"
@@ -350,9 +550,14 @@ apply_override() {
     original_path="${state_dir}/original.plist"
     manifest_path="${state_dir}/manifest.plist"
 
+    path_has_disallowed_symbolic_link "$target_path" && fail "target path traverses a symbolic link"
+    path_has_disallowed_symbolic_link "$state_dir" && fail "state path traverses a symbolic link"
+    reset_operation_cleanup_state
+    acquire_display_lock "$state_root" "$vendor_id" "$product_id" || fail "could not acquire display operation lock"
     [[ ! -e "$manifest_path" && ! -e "$original_path" ]] || fail "existing state requires manual inspection before another apply"
     directory_is_empty "$state_dir" || fail "state directory must be empty before apply"
-    /bin/mkdir -p "$target_dir" "$state_dir" || fail "could not create target or state directory"
+    ensure_directory_path_without_symlinks "$target_dir" || fail "could not create target directory safely"
+    ensure_directory_path_without_symlinks "$state_dir" || fail "could not create state directory safely"
     create_temporary_file "$target_dir" "DisplayProductID-${product_id}.candidate" || fail "could not create target candidate"
     candidate_path="$TEMPORARY_FILE"
 
@@ -361,7 +566,6 @@ apply_override() {
         create_temporary_file "$state_dir" "original.plist" || fail "could not create original backup candidate"
         backup_candidate_path="$TEMPORARY_FILE"
         /bin/cp -p "$target_path" "$backup_candidate_path" || fail "could not create exact original backup"
-        set_written_file_permissions "$backup_candidate_path" "$state_is_system_path" || fail "could not set original backup permissions"
         original_hash="$(sha256_file "$backup_candidate_path")" || fail "could not hash original override"
         /bin/cp "$target_path" "$candidate_path" || fail "could not create candidate override"
     elif [[ -e "$target_path" ]]; then
@@ -379,6 +583,7 @@ apply_override() {
     write_manifest "$manifest_candidate_path" "$candidate_path" "$target_relative" "$target_existed" "$vendor_id" "$product_id" "$native_resolution" "$original_hash" "$candidate_hash" || fail "could not write manifest"
     set_written_file_permissions "$manifest_candidate_path" "$state_is_system_path" || fail "could not set manifest permissions"
     commit_apply_state "$target_path" "$candidate_path" "$target_existed" "$original_hash" "$backup_candidate_path" "$original_path" "$manifest_candidate_path" "$manifest_path" "$state_dir" || fail "apply did not complete; target override was not replaced"
+    complete_operation_cleanup || fail "apply completed but could not release display operation lock"
 
     printf 'applied=%s\n' "$target_relative"
     printf 'manifest=%s\n' "$manifest_path"
@@ -403,13 +608,13 @@ revert_override() {
     local current_hash
     local backup_hash
     local restore_candidate_path
-    local overrides_are_system_paths=false
 
     [[ "$confirmed" == true ]] || fail "revert requires --confirm"
     vendor_id="$(normalize_hex_id "$vendor_id")" || fail "vendor id must be hexadecimal"
     product_id="$(normalize_hex_id "$product_id")" || fail "product id must be hexadecimal"
+    overrides_root="$(normalize_storage_root "$overrides_root")" || fail "overrides root is invalid or traverses a symbolic link"
+    state_root="$(normalize_storage_root "$state_root")" || fail "state root is invalid or traverses a symbolic link"
     require_root_for_system_paths "$overrides_root" "$state_root"
-    [[ "$overrides_root" == "$DEFAULT_OVERRIDES_ROOT" ]] && overrides_are_system_paths=true
     target_path="$(path_for_display "$overrides_root" "$vendor_id" "$product_id")"
     target_dir="$(/usr/bin/dirname "$target_path")"
     target_relative="DisplayVendorID-${vendor_id}/DisplayProductID-${product_id}"
@@ -417,6 +622,10 @@ revert_override() {
     manifest_path="${state_dir}/manifest.plist"
     original_path="${state_dir}/original.plist"
 
+    path_has_disallowed_symbolic_link "$target_path" && fail "target path traverses a symbolic link"
+    path_has_disallowed_symbolic_link "$state_dir" && fail "state path traverses a symbolic link"
+    reset_operation_cleanup_state
+    acquire_display_lock "$state_root" "$vendor_id" "$product_id" || fail "could not acquire display operation lock"
     [[ -f "$manifest_path" ]] || fail "no manifest exists for this target"
     manifest_metadata="$(read_revert_manifest "$manifest_path" "$vendor_id" "$product_id" "$target_relative")" || fail "manifest is invalid or does not match this display"
     IFS='|' read -r target_existed candidate_hash original_hash <<< "$manifest_metadata"
@@ -432,7 +641,6 @@ revert_override() {
         create_temporary_file "$target_dir" "DisplayProductID-${product_id}.restore" || fail "could not create restore candidate"
         restore_candidate_path="$TEMPORARY_FILE"
         /bin/cp -p "$original_path" "$restore_candidate_path" || fail "could not prepare exact restore candidate"
-        set_written_file_permissions "$restore_candidate_path" "$overrides_are_system_paths" || fail "could not set restore candidate permissions"
         /bin/mv -f "$restore_candidate_path" "$target_path" || fail "could not atomically restore original override"
     elif [[ "$target_existed" == false ]]; then
         /bin/rm -f "$target_path" || fail "could not remove created target override"
@@ -446,6 +654,7 @@ revert_override() {
     /bin/rm -f "$manifest_path" || fail "override was reverted but manifest could not be removed"
     /bin/rmdir "$state_dir" 2>/dev/null || true
     /bin/rmdir "$(/usr/bin/dirname "$state_dir")" 2>/dev/null || true
+    complete_operation_cleanup || fail "revert completed but could not release display operation lock"
 
     printf 'reverted=%s\n' "$target_relative"
 }

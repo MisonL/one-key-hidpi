@@ -26,6 +26,18 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/xzhih/one-key-hidpi/mast
 
 2.Local Mode: Download ZIP, decompressing it, and double click `hidpi.command` to run
 
+### Intel safe HiDPI menu
+
+The `Intel safe HiDPI` menu is available only from a complete local checkout
+that includes `intel-hidpi.sh` and `lib/intel_hidpi_menu.sh`. The single-file
+remote command above keeps the original menu options and does not load local
+helper files from the current directory.
+
+The local menu first previews bounded modes derived from the selected display
+EDID. Applying or reverting requires an explicit root invocation and typed
+confirmation. A display configuration reload, normally a reboot, is still
+required before macOS exposes changed override modes.
+
 ![RUN](./img/run.jpg)
 
 ## Recovery

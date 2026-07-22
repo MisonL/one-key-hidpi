@@ -28,6 +28,16 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/xzhih/one-key-hidpi/mast
 
 2.本地模式: 下载项目解压,双击 `hidpi.command` 运行
 
+### Intel 安全 HiDPI 菜单
+
+`Intel 安全 HiDPI` 菜单仅在包含 `intel-hidpi.sh` 和
+`lib/intel_hidpi_menu.sh` 的完整本地仓库中提供。上面的单文件远程命令会保留
+原有菜单项，不会从当前目录加载辅助文件。
+
+本地菜单会先依据所选显示器的 EDID 预览受限模式。应用或回退均要求以 root
+身份运行并输入明确确认词。修改 override 后仍需让 macOS 重载显示器配置，通常
+需要重启，系统才会显示新模式。
+
 ![运行](./img/run-zh.jpg)
 
 ## 恢复
@@ -81,4 +91,3 @@ rm -rf /Volumes/你的系统盘/Library/Displays/Contents/Resources/Overrides
 https://www.tonymacx86.com/threads/solved-black-screen-with-gtx-1070-lg-ultrafine-5k-sierra-10-12-4.219872/page-4#post-1644805
 
 https://github.com/syscl/Enable-HiDPI-OSX
-

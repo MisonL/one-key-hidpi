@@ -6,6 +6,7 @@ set -o pipefail
 readonly DEFAULT_OVERRIDES_ROOT="/Library/Displays/Contents/Resources/Overrides"
 readonly DEFAULT_STATE_ROOT="/Library/Application Support/one-key-hidpi"
 readonly DEFAULT_FRAMEBUFFER_LIMIT=8192
+readonly MAX_NATIVE_DIMENSION=$((DEFAULT_FRAMEBUFFER_LIMIT / 2))
 readonly MANIFEST_VERSION=1
 readonly PRESET_NAMES=("compact" "balanced" "spacious" "dense" "native")
 readonly PRESET_NUMERATORS=(1 3 2 3 1)
@@ -42,6 +43,20 @@ decimal_from_hex() {
     printf '%d\n' "$((16#$value))"
 }
 
+decimal_at_most() {
+    local value="$1"
+    local limit="$2"
+
+    [[ "$value" =~ ^[1-9][0-9]*$ && "$limit" =~ ^[1-9][0-9]*$ ]] || return 1
+    if ((${#value} < ${#limit})); then
+        return 0
+    fi
+    if ((${#value} > ${#limit})); then
+        return 1
+    fi
+    [[ "$value" == "$limit" || "$value" < "$limit" ]]
+}
+
 parse_resolution() {
     local resolution="$1"
     local width
@@ -50,6 +65,8 @@ parse_resolution() {
     [[ "$resolution" =~ ^([1-9][0-9]*)x([1-9][0-9]*)$ ]] || return 1
     width="${BASH_REMATCH[1]}"
     height="${BASH_REMATCH[2]}"
+    decimal_at_most "$width" "$MAX_NATIVE_DIMENSION" || return 1
+    decimal_at_most "$height" "$MAX_NATIVE_DIMENSION" || return 1
     printf '%s:%s\n' "$width" "$height"
 }
 
@@ -60,6 +77,7 @@ normalize_edid() {
     [[ "$edid" =~ ^[0-9A-Fa-f]+$ ]] || return 1
     (( ${#edid} >= 144 && ${#edid} % 2 == 0 )) || return 1
     normalized_edid="$(printf '%s' "$edid" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+    [[ "${normalized_edid:0:16}" == "00ffffffffffff00" ]] || return 1
     printf '%s\n' "$normalized_edid"
 }
 
@@ -128,7 +146,7 @@ preview() {
     local logical_resolution
     local outputs=()
 
-    [[ "$framebuffer_limit" =~ ^[1-9][0-9]*$ ]] || fail "framebuffer limit must be a positive integer"
+    decimal_at_most "$framebuffer_limit" "$DEFAULT_FRAMEBUFFER_LIMIT" || fail "framebuffer limit must be a positive integer no greater than ${DEFAULT_FRAMEBUFFER_LIMIT}"
     parsed_resolution="$(parse_resolution "$native_resolution")" || fail "native resolution must use positive WIDTHxHEIGHT values"
     native_width="${parsed_resolution%%:*}"
     native_height="${parsed_resolution##*:}"
@@ -334,9 +352,7 @@ inventory() {
     fi
 
     while IFS= read -r edid; do
-        normalized_edid="$(printf '%s' "$edid" | /usr/bin/tr '[:upper:]' '[:lower:]')"
-        [[ "$normalized_edid" =~ ^[0-9a-f]+$ ]] || continue
-        (( ${#normalized_edid} >= 128 )) || continue
+        normalized_edid="$(normalize_edid "$edid")" || continue
 
         case ":${seen_edids}:" in
         *":${normalized_edid}:"*)

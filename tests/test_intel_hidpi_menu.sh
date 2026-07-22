@@ -20,6 +20,19 @@ assert_contains() {
     printf '%s\n' "$haystack" | /usr/bin/grep -Fq "$expected" || fail "missing expected text: ${expected}"
 }
 
+assert_not_contains() {
+    local haystack="$1"
+    local unexpected="$2"
+
+    if printf '%s\n' "$haystack" | /usr/bin/grep -Fq "$unexpected"; then
+        fail "unexpected text: ${unexpected}"
+    fi
+}
+
+assert_file_absent() {
+    [[ ! -e "$1" && ! -L "$1" ]] || fail "unexpected file: $1"
+}
+
 first_edid="$(/usr/bin/sed -n 's/.*"IODisplayEDID" = <\([0-9A-Fa-f][0-9A-Fa-f]*\)>.*/\1/p' "${fixture_dir}/ioreg-displays.txt" | /usr/bin/sed -n '1p')"
 
 menu_preview_output="$(\
@@ -48,7 +61,16 @@ if printf '%s\n' "$menu_definition" | /usr/bin/grep -Fq "sudo"; then
 fi
 
 entrypoint_trace="$(mktemp "${TMPDIR:-/tmp}/one-key-hidpi-menu.XXXXXX")"
-trap '/bin/rm -f "$entrypoint_trace"' EXIT
+standalone_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-standalone.XXXXXX")"
+standalone_script="${standalone_dir}/hidpi.sh"
+remote_source_marker="${standalone_dir}/remote-source-marker"
+
+cleanup() {
+    /bin/rm -f "$entrypoint_trace"
+    /bin/rm -rf "$standalone_dir"
+}
+
+trap cleanup EXIT
 
 if ! /bin/bash -c '
     source "$1"
@@ -114,6 +136,75 @@ assert_legacy_dispatch() {
 assert_legacy_dispatch 1 $'init\nenable'
 assert_legacy_dispatch 2 $'init\npatch'
 assert_legacy_dispatch 3 $'init\ndisable'
+
+/bin/cp "$repo_dir/hidpi.sh" "$standalone_script" || fail "could not create standalone hidpi script"
+/bin/chmod +x "$standalone_script" || fail "could not mark standalone hidpi script executable"
+
+assert_standalone_legacy_dispatch() {
+    local choice="$1"
+    local expected="$2"
+    local actual
+
+    : > "$entrypoint_trace"
+    if ! /bin/bash -c '
+        cd "$2"
+        source "$1"
+        trace_path="$3"
+        is_applesilicon=false
+        select_display() {
+            EDID=test
+            Vid=30ae
+            Pid=62a5
+        }
+        init() {
+            printf "init\n" >> "$trace_path"
+        }
+        enable_hidpi() {
+            printf "enable\n" >> "$trace_path"
+        }
+        enable_hidpi_with_patch() {
+            printf "patch\n" >> "$trace_path"
+        }
+        disable() {
+            printf "disable\n" >> "$trace_path"
+        }
+        printf "%s\n" "$4" | start
+    ' bash "$standalone_script" "$standalone_dir" "$entrypoint_trace" "$choice" >/dev/null; then
+        fail "standalone legacy menu option ${choice} should succeed"
+    fi
+
+    actual="$(/bin/cat "$entrypoint_trace")" || fail "standalone legacy trace should be readable"
+    [[ "$actual" == "$expected" ]] || fail "standalone legacy menu option ${choice} dispatch changed"
+}
+
+assert_standalone_legacy_dispatch 1 $'init\nenable'
+assert_standalone_legacy_dispatch 2 $'init\npatch'
+assert_standalone_legacy_dispatch 3 $'init\ndisable'
+
+remote_script="$(/bin/cat "$standalone_script")" || fail "could not read standalone hidpi script"
+/bin/mkdir -p "${standalone_dir}/lib" || fail "could not create remote helper fixture"
+# shellcheck disable=SC2016
+printf 'printf "unexpected helper source\\n" >> "$REMOTE_SOURCE_MARKER"\n' > "${standalone_dir}/lib/intel_hidpi_menu.sh"
+printf ':\n' > "${standalone_dir}/intel-hidpi.sh"
+remote_output=""
+if remote_output="$(
+    cd "$standalone_dir" || exit 1
+    printf "4\n" | LANG=C LC_ALL=C REMOTE_SOURCE_MARKER="$remote_source_marker" /bin/bash -c '
+        remote_script="$1"
+        remote_edid="$2"
+        ioreg() {
+            printf "    | | \\"IODisplayEDID\\" = <%s>\\n" "$remote_edid"
+        }
+        eval "$remote_script"
+    ' bash "$remote_script" "$first_edid" 2>&1
+)"; then
+    fail "remote single-file script should reject an unavailable safe-menu selection"
+fi
+assert_contains "$remote_output" "(1) Enable HIDPI"
+assert_contains "$remote_output" "(3) Disable HIDPI"
+assert_contains "$remote_output" "Enter error, bye"
+assert_not_contains "$remote_output" "Intel safe HiDPI"
+assert_file_absent "$remote_source_marker"
 
 if ((EUID != 0)); then
     if nonroot_output="$(\

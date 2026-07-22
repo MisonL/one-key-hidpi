@@ -53,4 +53,23 @@ if "${repo_dir}/intel-hidpi.sh" native-resolution --edid invalid >/dev/null 2>&1
     fail "invalid EDID must fail explicitly"
 fi
 
+invalid_header_edid="01${first_edid:2}"
+if "${repo_dir}/intel-hidpi.sh" native-resolution --edid "$invalid_header_edid" >/dev/null 2>&1; then
+    fail "EDID without the standard header must fail explicitly"
+fi
+
+odd_length_edid="${first_edid%?}"
+if "${repo_dir}/intel-hidpi.sh" native-resolution --edid "$odd_length_edid" >/dev/null 2>&1; then
+    fail "odd-length EDID must fail explicitly"
+fi
+
+invalid_ioreg_file="$(mktemp "${TMPDIR:-/tmp}/one-key-hidpi-invalid-edid.XXXXXX")"
+trap '/bin/rm -f "$invalid_ioreg_file"' EXIT
+printf '    | | "IODisplayEDID" = <%s>\n' "$invalid_header_edid" > "$invalid_ioreg_file"
+if "${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "$invalid_ioreg_file" \
+    --overrides-root "${fixture_dir}/overrides" >/dev/null 2>&1; then
+    fail "inventory must reject EDID without the standard header"
+fi
+
 printf 'PASS: Intel HiDPI inventory\n'
