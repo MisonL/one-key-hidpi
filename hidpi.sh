@@ -36,6 +36,17 @@ langNotChange="Do not change"
 langEnableHIDPI="(%d) Enable HIDPI"
 langEnableHIDPIEDID="(%d) Enable HIDPI (with EDID)"
 langDisableHIDPI="(%d) Disable HIDPI"
+langIntelSafeHIDPI="(%d) Intel safe HiDPI"
+
+langIntelSafeTitle="Intel safe HiDPI"
+langIntelSafeApply="(1) Apply generated modes"
+langIntelSafeRevert="(2) Revert generated modes"
+langIntelSafeCancel="(3) Cancel"
+langIntelSafeRoot="Run this script as root to change the selected display."
+langIntelSafeApplyConfirm="Type APPLY to write the selected display override"
+langIntelSafeRevertConfirm="Type REVERT to remove this tool's selected display override"
+langIntelSafeCancelled="Cancelled"
+langIntelSafeToolMissing="Intel safe HiDPI tool is missing."
 
 langDisableOpt1="(1) Disable HIDPI on this monitor"
 langDisableOpt2="(2) Reset all settings to macOS default"
@@ -73,6 +84,17 @@ if [[ "${systemLanguage}" == "zh_CN" ]]; then
     langEnableHIDPI="(%d) 开启HIDPI"
     langEnableHIDPIEDID="(%d) 开启HIDPI(同时注入EDID)"
     langDisableHIDPI="(%d) 关闭HIDPI"
+    langIntelSafeHIDPI="(%d) Intel 安全 HiDPI"
+
+    langIntelSafeTitle="Intel 安全 HiDPI"
+    langIntelSafeApply="(1) 应用生成的模式"
+    langIntelSafeRevert="(2) 回退本工具生成的模式"
+    langIntelSafeCancel="(3) 取消"
+    langIntelSafeRoot="请以 root 身份运行此脚本后再修改当前显示器。"
+    langIntelSafeApplyConfirm="输入 APPLY 以写入当前显示器 override"
+    langIntelSafeRevertConfirm="输入 REVERT 以移除本工具对当前显示器的 override"
+    langIntelSafeCancelled="已取消"
+    langIntelSafeToolMissing="未找到 Intel 安全 HiDPI 工具。"
 
     langDisableOpt1="(1) 在此显示器上禁用 HIDPI"
     langDisableOpt2="(2) 还原所有设置至 macOS 默认"
@@ -126,6 +148,11 @@ elif [[ "${systemLanguage}" == "uk_UA" ]]; then
     langNoMonitFound="Моніторів не знайдено. Завершую роботу..."
     langMonitVIDPID="ID Виробника:ID пристрою твого монітора:"
 fi
+
+source "${currentDir}/lib/intel_hidpi_menu.sh" || {
+    echo "Could not load Intel safe HiDPI menu"
+    exit 1
+}
 
 function get_edid() {
     local index=0
@@ -296,6 +323,23 @@ function get_vidpid_applesilicon() {
     Pid=($(printf '%x\n' ${ProductID}))
 }
 
+# Select a connected display without touching the legacy override paths.
+function select_display() {
+    if [[ $is_applesilicon == true ]]; then
+        get_vidpid_applesilicon
+    else
+        get_edid
+    fi
+
+    # Check if monitor was found
+    if [[ -z $VendorID || -z $ProductID || $VendorID == 0 || $ProductID == 0 ]]; then
+        echo "$langNoMonitFound"
+        exit 2
+    fi
+
+    echo "$langMonitVIDPID $Vid:$Pid"
+}
+
 # init
 function init() {
     rm -rf ${currentDir}/tmp/
@@ -322,20 +366,6 @@ function init() {
     mbicon=${sysOverrides}"\/DisplayVendorID\-610\/DisplayProductID\-a028\-9d9da0\.tiff"
     lgicon=${sysOverrides}"\/DisplayVendorID\-1e6d\/DisplayProductID\-5b11\.tiff"
     proxdricon=${Overrides}"\/DisplayVendorID\-610\/DisplayProductID\-ae2f\_Landscape\.tiff"
-    
-    if [[ $is_applesilicon == true ]]; then
-        get_vidpid_applesilicon
-    else
-        get_edid
-    fi
-
-    # Check if monitor was found
-    if [[ -z $VendorID || -z $ProductID || $VendorID == 0 || $ProductID == 0 ]]; then
-        echo "$langNoMonitFound"
-        exit 2
-    fi
-
-    echo "$langMonitVIDPID $Vid:$Pid"
 
     # Finally generate restore command
     generate_restore_cmd
@@ -844,22 +874,27 @@ function disable() {
 
 #
 function start() {
-    init
+    select_display
     echo ""
     let opt++; printf "${langEnableHIDPI}\n" $opt
     if [[ $is_applesilicon == false ]]; then
         let opt++; printf "${langEnableHIDPIEDID}\n" $opt
     fi
     let opt++; printf "${langDisableHIDPI}\n" $opt
+    if [[ $is_applesilicon == false ]]; then
+        let opt++; printf "${langIntelSafeHIDPI}\n" $opt
+    fi
     echo ""
 
     read -p "${langInputChoice} [1~$opt]: " input
     if [[ $is_applesilicon == true ]]; then
         case ${input} in
         1)
+            init
             enable_hidpi
             ;;
         2)
+            init
             disable
             ;;
         *)
@@ -870,13 +905,19 @@ function start() {
     else
         case ${input} in
         1)
+            init
             enable_hidpi
             ;;
         2)
+            init
             enable_hidpi_with_patch
             ;;
         3)
+            init
             disable
+            ;;
+        4)
+            intel_safe_hidpi "${currentDir}/intel-hidpi.sh" "$EDID" "$Vid" "$Pid"
             ;;
         *)
             echo "${langEnterError}"
@@ -886,4 +927,6 @@ function start() {
     fi
 }
 
-start
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    start
+fi

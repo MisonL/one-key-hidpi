@@ -15,6 +15,7 @@ usage() {
     cat <<'EOF'
 Usage:
   intel-hidpi.sh inventory [--ioreg-file PATH] [--overrides-root PATH]
+  intel-hidpi.sh native-resolution --edid HEX
   intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS]
   intel-hidpi.sh apply --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--overrides-root PATH] [--state-root PATH] --confirm
   intel-hidpi.sh revert --vendor-id HEX --product-id HEX [--overrides-root PATH] [--state-root PATH] --confirm
@@ -22,6 +23,7 @@ Usage:
 Commands:
   inventory  Read connected Intel-compatible external display metadata and
              existing EDID override modes. This command never writes files.
+  native-resolution  Read one EDID and print its preferred panel resolution.
   preview    Generate candidate 2x HiDPI modes without writing an override.
   apply      Merge generated modes into one target override after confirmation.
   revert     Restore or remove only the target override recorded by apply.
@@ -49,6 +51,16 @@ parse_resolution() {
     width="${BASH_REMATCH[1]}"
     height="${BASH_REMATCH[2]}"
     printf '%s:%s\n' "$width" "$height"
+}
+
+normalize_edid() {
+    local edid="$1"
+    local normalized_edid
+
+    [[ "$edid" =~ ^[0-9A-Fa-f]+$ ]] || return 1
+    (( ${#edid} >= 144 && ${#edid} % 2 == 0 )) || return 1
+    normalized_edid="$(printf '%s' "$edid" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+    printf '%s\n' "$normalized_edid"
 }
 
 scale_dimension_to_even() {
@@ -200,6 +212,14 @@ preferred_resolution_from_edid() {
     done
 
     return 1
+}
+
+native_resolution_from_edid() {
+    local edid="$1"
+    local normalized_edid
+
+    normalized_edid="$(normalize_edid "$edid")" || return 1
+    preferred_resolution_from_edid "$normalized_edid"
 }
 
 scale_payloads_from_override() {
@@ -382,6 +402,26 @@ run_preview_command() {
     preview "$native_resolution" "$framebuffer_limit"
 }
 
+run_native_resolution_command() {
+    local edid=""
+
+    while (($# > 0)); do
+        case "$1" in
+        --edid)
+            (($# >= 2)) || fail "--edid requires a hexadecimal value"
+            edid="$2"
+            shift 2
+            ;;
+        *)
+            fail "unknown native-resolution option: $1"
+            ;;
+        esac
+    done
+
+    [[ -n "$edid" ]] || fail "--edid is required"
+    native_resolution_from_edid "$edid" || fail "could not read a preferred resolution from EDID"
+}
+
 run_apply_command() {
     local vendor_id=""
     local product_id=""
@@ -485,6 +525,10 @@ main() {
     preview)
         shift
         run_preview_command "$@"
+        ;;
+    native-resolution)
+        shift
+        run_native_resolution_command "$@"
         ;;
     apply)
         shift

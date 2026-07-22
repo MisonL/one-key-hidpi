@@ -23,6 +23,10 @@ output="$("${repo_dir}/intel-hidpi.sh" inventory \
     --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
     --overrides-root "${fixture_dir}/overrides")" || fail "inventory command should succeed"
 
+first_edid="$(/usr/bin/sed -n 's/.*"IODisplayEDID" = <\([0-9A-Fa-f][0-9A-Fa-f]*\)>.*/\1/p' "${fixture_dir}/ioreg-displays.txt" | /usr/bin/sed -n '1p')"
+native_resolution="$("${repo_dir}/intel-hidpi.sh" native-resolution --edid "$first_edid")" || fail "native-resolution command should succeed"
+[[ "$native_resolution" == "1920x1080" ]] || fail "expected 1920x1080 native resolution, got ${native_resolution}"
+
 assert_contains "$output" "display[1]"
 assert_contains "$output" "  name=Test-1080p"
 assert_contains "$output" "  vendor-id=0x30ae (12462)"
@@ -43,6 +47,10 @@ if "${repo_dir}/intel-hidpi.sh" inventory \
     --ioreg-file "${fixture_dir}/empty-ioreg.txt" \
     --overrides-root "${fixture_dir}/overrides" >/dev/null 2>&1; then
     fail "missing input fixture should fail explicitly"
+fi
+
+if "${repo_dir}/intel-hidpi.sh" native-resolution --edid invalid >/dev/null 2>&1; then
+    fail "invalid EDID must fail explicitly"
 fi
 
 printf 'PASS: Intel HiDPI inventory\n'
