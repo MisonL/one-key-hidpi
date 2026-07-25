@@ -1,0 +1,237 @@
+readonly MANIFEST_VERSION=4
+
+insert_manifest_payloads() {
+    local manifest_path="$1"
+    local candidate_path="$2"
+    local expected_hash="$3"
+    local expected_identity="$4"
+    local candidate_hash="$5"
+    local candidate_identity="$6"
+    local payloads
+    local payload
+    local payload_count=0
+    local current_hash="$expected_hash"
+    local current_identity="$expected_identity"
+
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert payloads -array || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    payloads="$(verified_scale_payloads_from_override "$candidate_path" "$candidate_hash" "$candidate_identity")" || return 1
+
+    while IFS= read -r payload; do
+        [[ -n "$payload" ]] || continue
+        run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert "payloads.${payload_count}" -string "$payload" || return 1
+        current_hash="$PLIST_OPERATION_HASH"
+        current_identity="$PLIST_OPERATION_IDENTITY"
+        payload_count=$((payload_count + 1))
+    done <<< "$payloads"
+
+    ((payload_count > 0)) || return 1
+    PLIST_OPERATION_HASH="$current_hash"
+    PLIST_OPERATION_IDENTITY="$current_identity"
+}
+
+write_manifest() {
+    local manifest_path="$1"
+    local candidate_path="$2"
+    local overrides_root="$3"
+    local target_relative="$4"
+    local target_existed="$5"
+    local vendor_id="$6"
+    local product_id="$7"
+    local native_resolution="$8"
+    local original_hash="$9"
+    local candidate_hash="${10}"
+    local candidate_identity="${11}"
+    local expected_hash="${12}"
+    local expected_identity="${13}"
+    local current_hash="$expected_hash"
+    local current_identity="$expected_identity"
+
+    valid_sha256 "$expected_hash" || return 1
+    valid_file_identity "$expected_identity" || return 1
+    valid_file_identity "$candidate_identity" || return 1
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -create xml1 || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert manifest-version -integer "$MANIFEST_VERSION" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert commit-state -string pending || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert overrides-root -string "$overrides_root" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert target-relative-path -string "$target_relative" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert target-existed -bool "$target_existed" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert vendor-id -string "$vendor_id" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert product-id -string "$product_id" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert native-resolution -string "$native_resolution" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert original-sha256 -string "$original_hash" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert candidate-sha256 -string "$candidate_hash" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert candidate-file-identity -string "" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert original-file-identity -string "" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    insert_manifest_payloads "$manifest_path" "$candidate_path" "$current_hash" "$current_identity" "$candidate_hash" "$candidate_identity" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    plist_file_is_valid "$manifest_path" "$current_hash" "$current_identity" || return 1
+    PLIST_OPERATION_HASH="$current_hash"
+    PLIST_OPERATION_IDENTITY="$current_identity"
+}
+
+record_pending_manifest_original_identity() {
+    local manifest_path="$1"
+    local expected_hash="$2"
+    local expected_identity="$3"
+    local original_identity="$4"
+    local commit_state
+    local recorded_original_identity
+
+    valid_sha256 "$expected_hash" || return 1
+    valid_file_identity "$expected_identity" || return 1
+    valid_file_identity "$original_identity" || return 1
+    commit_state="$(plist_raw_value "$manifest_path" "$expected_hash" "$expected_identity" commit-state string)" || return 1
+    [[ "$commit_state" == pending ]] || return 1
+    recorded_original_identity="$(plist_raw_value "$manifest_path" "$expected_hash" "$expected_identity" original-file-identity string)" || return 1
+    [[ -z "$recorded_original_identity" ]] || return 1
+    run_plutil_and_update_hash "$manifest_path" "$expected_hash" "$expected_identity" \
+        -replace original-file-identity -string "$original_identity"
+}
+
+finalize_pending_manifest() {
+    local manifest_path="$1"
+    local expected_hash="$2"
+    local expected_identity="$3"
+    local candidate_identity="$4"
+    local current_hash="$expected_hash"
+    local current_identity="$expected_identity"
+    local commit_state
+    local recorded_candidate_identity
+
+    valid_sha256 "$expected_hash" || return 1
+    valid_file_identity "$expected_identity" || return 1
+    valid_file_identity "$candidate_identity" || return 1
+    commit_state="$(plist_raw_value "$manifest_path" "$current_hash" "$current_identity" commit-state string)" || return 1
+    [[ "$commit_state" == pending ]] || return 1
+    recorded_candidate_identity="$(plist_raw_value "$manifest_path" "$current_hash" "$current_identity" candidate-file-identity string)" || return 1
+    [[ -z "$recorded_candidate_identity" ]] || return 1
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" \
+        -replace candidate-file-identity -string "$candidate_identity" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" \
+        -replace commit-state -string committed || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    plist_file_is_valid "$manifest_path" "$current_hash" "$current_identity" || return 1
+    PLIST_OPERATION_HASH="$current_hash"
+    PLIST_OPERATION_IDENTITY="$current_identity"
+}
+
+read_revert_manifest() {
+    local manifest_path="$1"
+    local vendor_id="$2"
+    local product_id="$3"
+    local target_relative="$4"
+    local overrides_root="$5"
+    local manifest_version
+    local manifest_vendor
+    local manifest_product
+    local manifest_overrides_root
+    local manifest_relative
+    local manifest_native_resolution
+    local commit_state
+    local target_existed
+    local candidate_hash
+    local original_hash
+    local candidate_identity
+    local original_identity
+    local payload_count
+    local manifest_hash_before
+    local manifest_identity_before
+    local manifest_snapshot
+
+    manifest_snapshot="$(darwin_file_snapshot "$manifest_path")" || return 1
+    IFS='|' read -r manifest_hash_before manifest_identity_before <<< "$manifest_snapshot"
+    valid_sha256 "$manifest_hash_before" || return 1
+    valid_file_identity "$manifest_identity_before" || return 1
+
+    read_revert_manifest_failure() {
+        if file_matches_snapshot "$manifest_path" "$manifest_hash_before" "$manifest_identity_before"; then
+            return 1
+        fi
+        return 4
+    }
+
+    read_revert_manifest_value() {
+        local key_path="$1"
+        local expected_type="$2"
+
+        plist_raw_value "$manifest_path" "$manifest_hash_before" "$manifest_identity_before" "$key_path" "$expected_type" || {
+            read_revert_manifest_failure
+            return $?
+        }
+    }
+
+    plist_file_is_valid "$manifest_path" "$manifest_hash_before" "$manifest_identity_before" || {
+        read_revert_manifest_failure
+        return $?
+    }
+    manifest_version="$(read_revert_manifest_value manifest-version integer)" || return $?
+    [[ "$manifest_version" == "$MANIFEST_VERSION" ]] || return 2
+    commit_state="$(read_revert_manifest_value commit-state string)" || return $?
+    [[ "$commit_state" == committed ]] || return 5
+    manifest_vendor="$(read_revert_manifest_value vendor-id string)" || return $?
+    manifest_product="$(read_revert_manifest_value product-id string)" || return $?
+    manifest_overrides_root="$(read_revert_manifest_value overrides-root string)" || return $?
+    manifest_relative="$(read_revert_manifest_value target-relative-path string)" || return $?
+    manifest_native_resolution="$(read_revert_manifest_value native-resolution string)" || return $?
+    target_existed="$(read_revert_manifest_value target-existed bool)" || return $?
+    candidate_hash="$(read_revert_manifest_value candidate-sha256 string)" || return $?
+    original_hash="$(read_revert_manifest_value original-sha256 string)" || return $?
+    candidate_identity="$(read_revert_manifest_value candidate-file-identity string)" || return $?
+    original_identity="$(read_revert_manifest_value original-file-identity string)" || return $?
+    payload_count="$(read_revert_manifest_value payloads array)" || return $?
+
+    [[ "$manifest_vendor" == "$vendor_id" && "$manifest_product" == "$product_id" ]] || return 1
+    [[ "$manifest_overrides_root" == "$overrides_root" ]] || return 3
+    [[ "$manifest_relative" == "$target_relative" ]] || return 1
+    parse_resolution "$manifest_native_resolution" >/dev/null || return 1
+    [[ "$target_existed" == true || "$target_existed" == false ]] || return 1
+    valid_sha256 "$candidate_hash" || return 1
+    valid_file_identity "$candidate_identity" || return 1
+    [[ "$payload_count" =~ ^[1-9][0-9]*$ ]] || return 1
+
+    if [[ "$target_existed" == true ]]; then
+        valid_sha256 "$original_hash" || return 1
+        valid_file_identity "$original_identity" || return 1
+    else
+        [[ -z "$original_hash" ]] || return 1
+        [[ -z "$original_identity" ]] || return 1
+    fi
+
+    file_matches_snapshot "$manifest_path" "$manifest_hash_before" "$manifest_identity_before" || return 4
+
+    printf '%s|%s|%s|%s|%s|%s|%s\n' \
+        "$target_existed" "$candidate_hash" "$candidate_identity" "$original_hash" "$original_identity" \
+        "$manifest_hash_before" "$manifest_identity_before"
+}

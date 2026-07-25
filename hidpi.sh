@@ -51,6 +51,7 @@ langIntelSafeApplyConfirm="Type APPLY to write the selected display override"
 langIntelSafeRevertConfirm="Type REVERT to remove this tool's selected display override"
 langIntelSafeCancelled="Cancelled"
 langIntelSafeToolMissing="Intel safe HiDPI tool is missing."
+langUnsafeVendorPath="Refusing to modify an unsafe vendor override path."
 
 langDisableOpt1="(1) Disable HIDPI on this monitor"
 langDisableOpt2="(2) Reset all settings to macOS default"
@@ -99,6 +100,7 @@ if [[ "${systemLanguage}" == "zh_CN" ]]; then
     langIntelSafeRevertConfirm="输入 REVERT 以移除本工具对当前显示器的 override"
     langIntelSafeCancelled="已取消"
     langIntelSafeToolMissing="未找到 Intel 安全 HiDPI 工具。"
+    langUnsafeVendorPath="拒绝修改不安全的显示器厂商 override 路径。"
 
     langDisableOpt1="(1) 在此显示器上禁用 HIDPI"
     langDisableOpt2="(2) 还原所有设置至 macOS 默认"
@@ -354,6 +356,9 @@ function select_display() {
 
 # init
 function init() {
+    # Generate the user-owned recovery script before preparing legacy paths.
+    generate_restore_cmd || return 1
+
     rm -rf ${currentDir}/tmp/
     mkdir -p ${currentDir}/tmp/
 
@@ -379,15 +384,183 @@ function init() {
     lgicon=${sysOverrides}"\/DisplayVendorID\-1e6d\/DisplayProductID\-5b11\.tiff"
     proxdricon=${Overrides}"\/DisplayVendorID\-610\/DisplayProductID\-ae2f\_Landscape\.tiff"
 
-    # Finally generate restore command
-    generate_restore_cmd
+}
+
+function legacy_run_perl() {
+    local requires_root="$1"
+
+    shift
+    case "$requires_root" in
+    true)
+        sudo /usr/bin/perl "$@"
+        ;;
+    false)
+        /usr/bin/perl "$@"
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+function legacy_remove_icon_product_entry() {
+    local requires_root="$1"
+    local icons_path="$2"
+    local vendor_id="$3"
+    local product_id="$4"
+    local icons_parent="${icons_path%/*}"
+    local icons_name="${icons_path##*/}"
+
+    [[ -n "$icons_parent" && -n "$icons_name" && "$icons_name" != "." && "$icons_name" != ".." ]] || return 1
+    [[ "$icons_name" == "Icons.plist" ]] || return 1
+    [[ "$vendor_id" =~ ^[0-9A-Fa-f]+$ && "$product_id" =~ ^[0-9A-Fa-f]+$ ]] || return 1
+    # shellcheck disable=SC2016
+    legacy_run_perl "$requires_root" -e '
+        use Fcntl qw(FD_CLOEXEC F_GETFD F_SETFD O_DIRECTORY O_NOFOLLOW O_NONBLOCK O_RDONLY O_RDWR S_IFMT S_IFREG);
+
+        my ($parent_path, $icons_name, $vendor_id, $product_id) = @ARGV;
+        $parent_path =~ s{\A/tmp(?=/|$)}{/private/tmp};
+        $parent_path =~ s{\A/var(?=/|$)}{/private/var};
+
+        my $sys_openat = 463;
+        my $open_directory_nofollow_any = 0x20100000;
+        sysopen(my $parent, $parent_path,
+            O_RDONLY | O_DIRECTORY | $open_directory_nofollow_any) or exit 1;
+        my $icons_fd = syscall($sys_openat, fileno($parent), $icons_name,
+            O_RDWR | O_NOFOLLOW | O_NONBLOCK, 0);
+        exit 1 if $icons_fd < 0;
+        open(my $icons, "+<&=$icons_fd") or exit 1;
+        my @icons_stat = stat($icons);
+        exit 1 unless @icons_stat;
+        exit 1 unless ($icons_stat[2] & S_IFMT) == S_IFREG;
+        exit 1 unless $icons_stat[3] == 1;
+        my $descriptor_flags = fcntl($icons, F_GETFD, 0);
+        exit 1 unless defined $descriptor_flags;
+        fcntl($icons, F_SETFD, $descriptor_flags & ~FD_CLOEXEC) or exit 1;
+
+        my $key_path = "vendors.$vendor_id.products.$product_id";
+        my $descriptor_path = "/dev/fd/$icons_fd";
+        my $lint_result = system("/usr/bin/plutil", "-lint", $descriptor_path);
+        exit 1 unless $lint_result == 0;
+        my $extract_result = system("/usr/bin/plutil", "-extract", $key_path,
+            "raw", "-o", "/dev/null", $descriptor_path);
+        exit 0 unless $extract_result == 0;
+        my $result = system("/usr/bin/plutil", "-remove", $key_path, $descriptor_path);
+        exit($result == 0 ? 0 : 1);
+    ' "$icons_parent" "$icons_name" "$vendor_id" "$product_id"
+}
+
+function legacy_remove_vendor_entries() {
+    local requires_root="$1"
+    local vendor_path="$2"
+    local product_id="$3"
+    local vendor_parent="${vendor_path%/*}"
+    local vendor_name="${vendor_path##*/}"
+
+    [[ -n "$vendor_parent" && -n "$vendor_name" && "$vendor_name" != "." && "$vendor_name" != ".." ]] || return 1
+    [[ "$vendor_name" =~ ^DisplayVendorID-[0-9A-Fa-f]+$ ]] || return 1
+    [[ "$product_id" =~ ^[0-9A-Fa-f]+$ ]] || return 1
+    # shellcheck disable=SC2016
+    legacy_run_perl "$requires_root" -e '
+        use Fcntl qw(O_DIRECTORY O_NOFOLLOW O_RDONLY);
+        use Errno qw(ENOENT);
+
+        my $parent_path = $ARGV[0];
+        my $vendor_name = $ARGV[1];
+        my $product_id = $ARGV[2];
+        $parent_path =~ s{\A/tmp(?=/|$)}{/private/tmp};
+        $parent_path =~ s{\A/var(?=/|$)}{/private/var};
+
+        my $sys_openat = 463;
+        my $sys_unlinkat = 472;
+        my $open_directory_nofollow_any = 0x20100000;
+        my $open_directory_nofollow = O_RDONLY | O_DIRECTORY | O_NOFOLLOW;
+
+        sysopen(my $parent, $parent_path,
+            O_RDONLY | O_DIRECTORY | $open_directory_nofollow_any) or exit 1;
+        my $parent_fd = fileno($parent);
+        my $vendor_fd = syscall($sys_openat, $parent_fd, $vendor_name,
+            $open_directory_nofollow, 0);
+        exit 1 if $vendor_fd < 0;
+
+        for my $suffix ("", ".icns", ".tiff") {
+            my $entry_name = "DisplayProductID-$product_id$suffix";
+            my $result = syscall($sys_unlinkat, $vendor_fd, $entry_name, 0);
+            next if $result == 0 || $! == ENOENT;
+            exit 1;
+        }
+
+        # A pathname-only directory removal cannot prove that the name still
+        # refers to the opened directory after an attacker races the name.
+        # Leave an empty legacy vendor directory rather than deleting a replacement.
+        exit 0;
+    ' "$vendor_parent" "$vendor_name" "$product_id"
+}
+
+function legacy_preflight_single_display_cleanup() {
+    local requires_root="$1"
+    local overrides_path="$2"
+    local vendor_id="$3"
+    local vendor_name="DisplayVendorID-${vendor_id}"
+
+    [[ "$requires_root" == true || "$requires_root" == false ]] || return 1
+    [[ -n "$overrides_path" && "$overrides_path" != *$'\n'* && "$overrides_path" != *$'\r'* ]] || return 1
+    [[ "$vendor_id" =~ ^[0-9A-Fa-f]+$ ]] || return 1
+    # shellcheck disable=SC2016
+    legacy_run_perl "$requires_root" -e '
+        use Fcntl qw(FD_CLOEXEC F_GETFD F_SETFD O_DIRECTORY O_NOFOLLOW O_NONBLOCK O_RDONLY S_IFMT S_IFREG);
+        use Errno qw(ENOENT);
+
+        my ($overrides_path, $vendor_name) = @ARGV;
+        $overrides_path =~ s{\A/tmp(?=/|$)}{/private/tmp};
+        $overrides_path =~ s{\A/var(?=/|$)}{/private/var};
+
+        my $sys_openat = 463;
+        my $open_directory_nofollow_any = 0x20100000;
+        my $icons_name = "Icons.plist";
+        sysopen(my $overrides, $overrides_path,
+            O_RDONLY | O_DIRECTORY | $open_directory_nofollow_any) or exit($! == ENOENT ? 0 : 1);
+        my $overrides_fd = fileno($overrides);
+
+        my $vendor_fd = syscall($sys_openat, $overrides_fd, $vendor_name,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+        exit 1 if $vendor_fd < 0 && $! != ENOENT;
+
+        my $icons_fd = syscall($sys_openat, $overrides_fd, $icons_name,
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK, 0);
+        exit 0 if $icons_fd < 0 && $! == ENOENT;
+        exit 1 if $icons_fd < 0;
+        open(my $icons, "<&=$icons_fd") or exit 1;
+        my @icons_stat = stat($icons);
+        exit 1 unless @icons_stat;
+        exit 1 unless ($icons_stat[2] & S_IFMT) == S_IFREG;
+        exit 1 unless $icons_stat[3] == 1;
+        my $descriptor_flags = fcntl($icons, F_GETFD, 0);
+        exit 1 unless defined $descriptor_flags;
+        fcntl($icons, F_SETFD, $descriptor_flags & ~FD_CLOEXEC) or exit 1;
+
+        my $lint_result = system("/usr/bin/plutil", "-lint", "/dev/fd/$icons_fd");
+        exit($lint_result == 0 ? 0 : 1);
+    ' "$overrides_path" "$vendor_name"
 }
 
 #
 function generate_restore_cmd() {
+    local restore_directory
+    local restore_script
+
+    [[ -n "${HOME:-}" && -d "$HOME" && -w "$HOME" ]] || {
+        echo "Cannot create the restore script in the home directory." >&2
+        return 1
+    }
+    restore_directory="$(cd "$HOME" && pwd -P)" || {
+        echo "Cannot create the restore script in the home directory." >&2
+        return 1
+    }
+    restore_script="${restore_directory}/.hidpi-disable"
 
     if [[ $is_applesilicon == true ]]; then
-        cat >"$(cd && pwd)/.hidpi-disable" <<-\CCC
+        cat >"$restore_script" <<-\CCC || return 1
 #!/bin/bash
 function get_vidpid_applesilicon() {
     local index=0
@@ -475,8 +648,8 @@ get_vidpid_applesilicon
 
 CCC
     else
-        cat >"$(cd && pwd)/.hidpi-disable" <<-\CCC
-#!/bin/sh
+        cat >"$restore_script" <<-\CCC || return 1
+#!/bin/bash
 function get_edid() {
     local index=0
     local selection=0
@@ -522,7 +695,14 @@ get_edid
 CCC
     fi
 
-    cat >>"$(cd && pwd)/.hidpi-disable" <<-\CCC
+    {
+        declare -f legacy_run_perl
+        declare -f legacy_remove_icon_product_entry
+        declare -f legacy_remove_vendor_entries
+        declare -f legacy_preflight_single_display_cleanup
+    } >>"$restore_script" || return 1
+
+    cat >>"$restore_script" <<-'CCC' || return 1
 # Check if monitor was found
 if [[ -z $VendorID || -z $ProductID || $VendorID == 0 || $ProductID == 0 ]]; then
     echo "No monitors found. Exiting..."
@@ -542,15 +722,22 @@ echo ""
 read -p "Enter your choice [1~2]: " input
 case ${input} in
 1)
-    if [[ -f "${restorePath}/Icons.plist" ]]; then
-        ${rootPath}/usr/libexec/plistbuddy -c "Delete :vendors:${Vid}:products:${Pid}" "${restorePath}/Icons.plist"
+    vendorPath="${restorePath}/DisplayVendorID-${Vid}"
+    legacy_preflight_single_display_cleanup false "$restorePath" "$Vid" || {
+        echo "Unsafe vendor override path. Exiting..."
+        exit 1
+    }
+    if [[ -e "${restorePath}/Icons.plist" || -L "${restorePath}/Icons.plist" ]]; then
+        legacy_remove_icon_product_entry false "${restorePath}/Icons.plist" "$Vid" "$Pid" || {
+            echo "Unsafe vendor override path. Exiting..."
+            exit 1
+        }
     fi
-    if [[ -e "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" || -L "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" || \
-        -e "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" || -L "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" || \
-        -e "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff" || -L "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff" ]]; then
-        rm -f "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" \
-            "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" \
-            "${restorePath}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff"
+    if [[ -e "$vendorPath" || -L "$vendorPath" ]]; then
+        legacy_remove_vendor_entries false "$vendorPath" "$Pid" || {
+            echo "Unsafe vendor override path. Exiting..."
+            exit 1
+        }
     fi
     ;;
 2)
@@ -566,7 +753,7 @@ esac
 echo "HIDPI Disabled"
 CCC
 
-    chmod +x "$(cd && pwd)/.hidpi-disable"
+    chmod +x "$restore_script" || return 1
 
 }
 
@@ -858,8 +1045,9 @@ function enable_hidpi_with_patch() {
     end
 }
 
-# disable
 function disable() {
+    local vendor_path="${targetDir}/DisplayVendorID-${Vid}"
+
     echo ""
     echo "${langDisableOpt1}"
     echo "${langDisableOpt2}"
@@ -868,15 +1056,21 @@ function disable() {
     read -p "${langInputChoice} [1~2]: " input
     case ${input} in
     1)
-        if [[ -f "${targetDir}/Icons.plist" ]]; then
-            sudo /usr/libexec/plistbuddy -c "Delete :vendors:${Vid}:products:${Pid}" "${targetDir}/Icons.plist"
+        legacy_preflight_single_display_cleanup true "$targetDir" "$Vid" || {
+            echo "$langUnsafeVendorPath"
+            return 1
+        }
+        if [[ -e "${targetDir}/Icons.plist" || -L "${targetDir}/Icons.plist" ]]; then
+            legacy_remove_icon_product_entry true "${targetDir}/Icons.plist" "$Vid" "$Pid" || {
+                echo "$langUnsafeVendorPath"
+                return 1
+            }
         fi
-        if [[ -e "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" || -L "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" || \
-            -e "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" || -L "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" || \
-            -e "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff" || -L "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff" ]]; then
-            sudo rm -f "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}" \
-                "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.icns" \
-                "${targetDir}/DisplayVendorID-${Vid}/DisplayProductID-${Pid}.tiff"
+        if [[ -e "$vendor_path" || -L "$vendor_path" ]]; then
+            legacy_remove_vendor_entries true "$vendor_path" "$Pid" || {
+                echo "$langUnsafeVendorPath"
+                return 1
+            }
         fi
         ;;
     2)
@@ -910,12 +1104,12 @@ function start() {
     if [[ $is_applesilicon == true ]]; then
         case ${input} in
         1)
-            init
+            init || exit 1
             enable_hidpi
             ;;
         2)
-            init
-            disable
+            init || exit 1
+            disable || exit 1
             ;;
         *)
             echo "${langEnterError}"
@@ -925,16 +1119,16 @@ function start() {
     else
         case ${input} in
         1)
-            init
+            init || exit 1
             enable_hidpi
             ;;
         2)
-            init
+            init || exit 1
             enable_hidpi_with_patch
             ;;
         3)
-            init
-            disable
+            init || exit 1
+            disable || exit 1
             ;;
         4)
             [[ $intelSafeHidpiAvailable == true ]] || {

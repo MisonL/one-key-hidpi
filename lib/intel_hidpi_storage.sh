@@ -1,452 +1,7 @@
-TEMPORARY_FILES=("")
-TEMPORARY_FILE=""
-CREATED_DIRECTORIES=("")
-OPERATION_LOCK_PATH=""
-
-cleanup_temporary_files() {
-    local temporary_file
-
-    for temporary_file in "${TEMPORARY_FILES[@]}"; do
-        [[ -n "$temporary_file" && -e "$temporary_file" ]] || continue
-        /bin/rm -f "$temporary_file"
-    done
-}
-
-cleanup_created_directories() {
-    local index
-    local directory
-
-    for ((index = ${#CREATED_DIRECTORIES[@]} - 1; index >= 0; index--)); do
-        directory="${CREATED_DIRECTORIES[$index]}"
-        [[ -n "$directory" && -d "$directory" && ! -L "$directory" ]] || continue
-        /bin/rmdir "$directory" 2>/dev/null || true
-    done
-}
-
-release_display_lock() {
-    local lock_owner
-
-    [[ -n "$OPERATION_LOCK_PATH" ]] || return 0
-    if [[ -L "$OPERATION_LOCK_PATH" ]]; then
-        return 1
-    fi
-    if [[ -f "$OPERATION_LOCK_PATH" ]]; then
-        lock_owner="$(/bin/cat "$OPERATION_LOCK_PATH" 2>/dev/null)" || return 1
-        [[ "$lock_owner" == "$$" ]] || return 1
-        /bin/rm -f "$OPERATION_LOCK_PATH" || return 1
-    fi
-    OPERATION_LOCK_PATH=""
-}
-
-cleanup_runtime_artifacts() {
-    release_display_lock >/dev/null 2>&1 || true
-    cleanup_temporary_files
-    cleanup_created_directories
-}
-
-trap cleanup_runtime_artifacts EXIT
-
-normalize_lexical_path() {
-    local input_path="$1"
-    local absolute_path
-    local current_directory
-    local component
-    local normalized_path=""
-    local -a input_components=("")
-
-    [[ -n "$input_path" && "$input_path" != *$'\n'* && "$input_path" != *$'\r'* ]] || return 1
-    if [[ "$input_path" == /* ]]; then
-        absolute_path="$input_path"
-    else
-        current_directory="$(/bin/pwd -P)" || return 1
-        absolute_path="${current_directory}/${input_path}"
-    fi
-
-    IFS='/' read -r -a input_components <<< "$absolute_path"
-    for component in "${input_components[@]}"; do
-        case "$component" in
-        ""|.)
-            ;;
-        ..)
-            [[ -n "$normalized_path" ]] || return 1
-            normalized_path="${normalized_path%/*}"
-            ;;
-        *)
-            [[ "$component" != *$'\n'* && "$component" != *$'\r'* ]] || return 1
-            normalized_path="${normalized_path}/${component}"
-            ;;
-        esac
-    done
-
-    if [[ -z "$normalized_path" ]]; then
-        printf '/\n'
-        return 0
-    fi
-    printf '%s\n' "$normalized_path"
-}
-
-path_has_disallowed_symbolic_link() {
-    local path="$1"
-    local component
-    local current_path=""
-    local -a components
-
-    IFS='/' read -r -a components <<< "$path"
-    for component in "${components[@]}"; do
-        [[ -n "$component" ]] || continue
-        current_path="${current_path}/${component}"
-        [[ -L "$current_path" ]] || continue
-        case "$current_path" in
-        /tmp|/var)
-            ;;
-        *)
-            return 0
-            ;;
-        esac
-    done
-    return 1
-}
-
-normalize_storage_root() {
-    local input_path="$1"
-    local lexical_path
-    local existing_path
-    local component
-    local resolved_path
-    local -a missing_components=("")
-
-    lexical_path="$(normalize_lexical_path "$input_path")" || return 1
-    case "$lexical_path" in
-    /tmp|/tmp/*)
-        lexical_path="/private${lexical_path}"
-        ;;
-    /var|/var/*)
-        lexical_path="/private${lexical_path}"
-        ;;
-    esac
-    path_has_disallowed_symbolic_link "$lexical_path" && return 1
-    existing_path="$lexical_path"
-
-    while [[ ! -e "$existing_path" ]]; do
-        [[ "$existing_path" != "/" ]] || return 1
-        component="${existing_path##*/}"
-        missing_components=("$component" "${missing_components[@]}")
-        existing_path="${existing_path%/*}"
-        [[ -n "$existing_path" ]] || existing_path="/"
-    done
-
-    [[ -d "$existing_path" && ! -L "$existing_path" ]] || return 1
-    resolved_path="$(/bin/realpath "$existing_path")" || return 1
-    for component in "${missing_components[@]}"; do
-        [[ -n "$component" ]] || continue
-        resolved_path="${resolved_path%/}/${component}"
-    done
-    printf '%s\n' "$resolved_path"
-}
-
-ensure_directory_path_without_symlinks() {
-    local path="$1"
-    local component
-    local current_path=""
-    local -a components=("")
-
-    [[ "$path" == /* ]] || return 1
-    IFS='/' read -r -a components <<< "$path"
-    for component in "${components[@]}"; do
-        [[ -n "$component" ]] || continue
-        current_path="${current_path}/${component}"
-        [[ ! -L "$current_path" ]] || return 1
-        if [[ -e "$current_path" ]]; then
-            [[ -d "$current_path" ]] || return 1
-            continue
-        fi
-        /bin/mkdir "$current_path" || return 1
-        [[ -d "$current_path" && ! -L "$current_path" ]] || return 1
-        CREATED_DIRECTORIES+=("$current_path")
-    done
-}
-
-acquire_display_lock() {
-    local overrides_root="$1"
-    local vendor_id="$2"
-    local product_id="$3"
-    local locks_directory
-    local lock_path
-
-    locks_directory="${overrides_root}/.one-key-hidpi-locks"
-    ensure_directory_path_without_symlinks "$locks_directory" || return 1
-    lock_path="$(target_lock_path "$overrides_root" "$vendor_id" "$product_id")" || return 1
-    [[ ! -L "$lock_path" ]] || return 1
-    /usr/bin/shlock -f "$lock_path" -p "$$" >/dev/null 2>&1 || return 1
-    OPERATION_LOCK_PATH="$lock_path"
-}
-
-normalize_hex_id() {
-    local value="$1"
-
-    [[ "$value" =~ ^[0-9A-Fa-f]{1,8}$ ]] || return 1
-    printf '%s\n' "$(printf '%08x' "$((16#$value))" | /usr/bin/sed 's/^0*//; s/^$/0/')"
-}
-
-parse_apply_request() {
-    local vendor_id="$1"
-    local product_id="$2"
-    local native_resolution="$3"
-    local vendor_decimal
-    local product_decimal
-
-    vendor_id="$(normalize_hex_id "$vendor_id")" || return 1
-    product_id="$(normalize_hex_id "$product_id")" || return 1
-    vendor_decimal="$(decimal_from_hex "$vendor_id")" || return 1
-    product_decimal="$(decimal_from_hex "$product_id")" || return 1
-    parse_resolution "$native_resolution" >/dev/null || return 1
-    printf '%s|%s|%s|%s\n' "$vendor_id" "$product_id" "$vendor_decimal" "$product_decimal"
-}
-
-path_for_display() {
-    local root="$1"
-    local vendor_id="$2"
-    local product_id="$3"
-
-    printf '%s/DisplayVendorID-%s/DisplayProductID-%s\n' "$root" "$vendor_id" "$product_id"
-}
-
-target_lock_path() {
-    local overrides_root="$1"
-    local vendor_id="$2"
-    local product_id="$3"
-
-    [[ "$overrides_root" == /* ]] || return 1
-    [[ "$vendor_id" =~ ^[0-9a-f]+$ && "$product_id" =~ ^[0-9a-f]+$ ]] || return 1
-    printf '%s/.one-key-hidpi-locks/DisplayVendorID-%s-DisplayProductID-%s.lock\n' \
-        "$overrides_root" "$vendor_id" "$product_id"
-}
-
-state_dir_for_display() {
-    local state_root="$1"
-    local vendor_id="$2"
-    local product_id="$3"
-
-    printf '%s/DisplayVendorID-%s/DisplayProductID-%s\n' "$state_root" "$vendor_id" "$product_id"
-}
-
-create_temporary_file() {
-    local directory="$1"
-    local label="$2"
-
-    TEMPORARY_FILE="$(/usr/bin/mktemp "${directory}/.${label}.XXXXXX")" || return 1
-    TEMPORARY_FILES+=("$TEMPORARY_FILE")
-}
-
-directory_is_empty() {
-    local directory="$1"
-    local first_entry
-
-    [[ ! -e "$directory" ]] && return 0
-    [[ -d "$directory" ]] || return 1
-    first_entry="$(/usr/bin/find "$directory" -mindepth 1 -maxdepth 1 -print -quit)" || return 1
-    [[ -z "$first_entry" ]]
-}
-
-require_root_for_system_paths() {
-    local overrides_root="$1"
-    local state_root="$2"
-
-    if is_system_overrides_root "$overrides_root" || is_system_state_root "$state_root"; then
-        ((EUID == 0)) || fail "writing default system paths requires root; rerun explicitly with sudo"
-    fi
-}
-
-is_system_overrides_root() {
-    local path="$1"
-
-    [[ "$path" == "$DEFAULT_OVERRIDES_ROOT" || "$path" == "/System/Volumes/Data${DEFAULT_OVERRIDES_ROOT}" ]]
-}
-
-is_system_state_root() {
-    local path="$1"
-
-    [[ "$path" == "$DEFAULT_STATE_ROOT" || "$path" == "/System/Volumes/Data${DEFAULT_STATE_ROOT}" ]]
-}
-
-reset_operation_cleanup_state() {
-    TEMPORARY_FILES=("")
-    TEMPORARY_FILE=""
-    CREATED_DIRECTORIES=("")
-    OPERATION_LOCK_PATH=""
-}
-
-complete_operation_cleanup() {
-    local cleanup_status=0
-
-    release_display_lock || cleanup_status=1
-    cleanup_temporary_files
-    cleanup_created_directories
-    reset_operation_cleanup_state
-    return "$cleanup_status"
-}
-
-set_written_file_permissions() {
-    local path="$1"
-    local system_path="$2"
-
-    /bin/chmod 0644 "$path" || return 1
-    if [[ "$system_path" == true ]]; then
-        /usr/sbin/chown root:wheel "$path" || return 1
-    fi
-}
-
-valid_sha256() {
-    [[ "$1" =~ ^[0-9a-f]{64}$ ]]
-}
-
-payloads_for_resolution() {
-    local native_resolution="$1"
-    local framebuffer_limit="$2"
-    local preview_output
-
-    preview_output="$(preview "$native_resolution" "$framebuffer_limit")" || return 1
-    printf '%s\n' "$preview_output" | /usr/bin/sed -n 's/.* payload=\([A-Za-z0-9+\/]*=*\)$/\1/p'
-}
-
-ensure_scale_resolutions_array() {
-    local candidate_path="$1"
-
-    if /usr/bin/plutil -extract scale-resolutions raw -expect array -o - "$candidate_path" >/dev/null 2>&1; then
-        return 0
-    fi
-    /usr/bin/plutil -insert scale-resolutions -array "$candidate_path"
-}
-
-append_missing_payloads() {
-    local candidate_path="$1"
-    local native_resolution="$2"
-    local framebuffer_limit="$3"
-    local payload
-    local generated_payloads
-    local existing_payloads
-    local payload_count
-
-    generated_payloads="$(payloads_for_resolution "$native_resolution" "$framebuffer_limit")" || return 1
-    ensure_scale_resolutions_array "$candidate_path" || return 1
-    existing_payloads="$(scale_payloads_from_override "$candidate_path")" || return 1
-    payload_count="$(/usr/bin/plutil -extract scale-resolutions raw -expect array -o - "$candidate_path")" || return 1
-
-    while IFS= read -r payload; do
-        [[ -n "$payload" ]] || continue
-        if ! printf '%s\n' "$existing_payloads" | /usr/bin/grep -Fqx "$payload"; then
-            /usr/bin/plutil -insert "scale-resolutions.${payload_count}" -data "$payload" "$candidate_path" || return 1
-            existing_payloads="${existing_payloads}${existing_payloads:+$'\n'}${payload}"
-            payload_count=$((payload_count + 1))
-        fi
-    done <<< "$generated_payloads"
-}
-
-create_base_override() {
-    local target_path="$1"
-    local vendor_decimal="$2"
-    local product_decimal="$3"
-
-    /usr/bin/plutil -create xml1 "$target_path" || return 1
-    /usr/bin/plutil -insert DisplayVendorID -integer "$vendor_decimal" "$target_path" || return 1
-    /usr/bin/plutil -insert DisplayProductID -integer "$product_decimal" "$target_path" || return 1
-    /usr/bin/plutil -insert scale-resolutions -array "$target_path"
-}
-
-validate_candidate_override() {
-    local candidate_path="$1"
-    local vendor_decimal="$2"
-    local product_decimal="$3"
-    local payload_count
-
-    /usr/bin/plutil -lint "$candidate_path" >/dev/null || return 1
-    [[ "$(/usr/bin/plutil -extract DisplayVendorID raw -expect integer -o - "$candidate_path")" == "$vendor_decimal" ]] || return 1
-    [[ "$(/usr/bin/plutil -extract DisplayProductID raw -expect integer -o - "$candidate_path")" == "$product_decimal" ]] || return 1
-    payload_count="$(/usr/bin/plutil -extract scale-resolutions raw -expect array -o - "$candidate_path")" || return 1
-    [[ "$payload_count" =~ ^[1-9][0-9]*$ ]]
-}
-
-insert_manifest_payloads() {
-    local manifest_path="$1"
-    local candidate_path="$2"
-    local payloads
-    local payload
-    local payload_count=0
-
-    /usr/bin/plutil -insert payloads -array "$manifest_path" || return 1
-    payloads="$(scale_payloads_from_override "$candidate_path")" || return 1
-
-    while IFS= read -r payload; do
-        [[ -n "$payload" ]] || continue
-        /usr/bin/plutil -insert "payloads.${payload_count}" -string "$payload" "$manifest_path" || return 1
-        payload_count=$((payload_count + 1))
-    done <<< "$payloads"
-
-    ((payload_count > 0))
-}
-
-write_manifest() {
-    local manifest_path="$1"
-    local candidate_path="$2"
-    local overrides_root="$3"
-    local target_relative="$4"
-    local target_existed="$5"
-    local vendor_id="$6"
-    local product_id="$7"
-    local native_resolution="$8"
-    local original_hash="$9"
-    local candidate_hash="${10}"
-
-    /usr/bin/plutil -create xml1 "$manifest_path" || return 1
-    # shellcheck disable=SC2153
-    /usr/bin/plutil -insert manifest-version -integer "$MANIFEST_VERSION" "$manifest_path" || return 1
-    /usr/bin/plutil -insert overrides-root -string "$overrides_root" "$manifest_path" || return 1
-    /usr/bin/plutil -insert target-relative-path -string "$target_relative" "$manifest_path" || return 1
-    /usr/bin/plutil -insert target-existed -bool "$target_existed" "$manifest_path" || return 1
-    /usr/bin/plutil -insert vendor-id -string "$vendor_id" "$manifest_path" || return 1
-    /usr/bin/plutil -insert product-id -string "$product_id" "$manifest_path" || return 1
-    /usr/bin/plutil -insert native-resolution -string "$native_resolution" "$manifest_path" || return 1
-    /usr/bin/plutil -insert original-sha256 -string "$original_hash" "$manifest_path" || return 1
-    /usr/bin/plutil -insert candidate-sha256 -string "$candidate_hash" "$manifest_path" || return 1
-    insert_manifest_payloads "$manifest_path" "$candidate_path" || return 1
-    /usr/bin/plutil -lint "$manifest_path" >/dev/null
-}
-
-sha256_file() {
-    /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
-}
-
-target_matches_pre_apply_state() {
-    local target_path="$1"
-    local target_existed="$2"
-    local original_hash="$3"
-    local current_hash
-
-    if [[ "$target_existed" == true ]]; then
-        [[ -f "$target_path" ]] || return 1
-        current_hash="$(sha256_file "$target_path")" || return 1
-        [[ "$current_hash" == "$original_hash" ]]
-    else
-        [[ ! -e "$target_path" ]]
-    fi
-}
-
-remove_apply_state() {
-    local manifest_path="$1"
-    local original_path="$2"
-    local state_dir="$3"
-    local cleanup_failed=false
-
-    if [[ -e "$manifest_path" ]] && ! /bin/rm -f "$manifest_path"; then
-        cleanup_failed=true
-    fi
-    if [[ -e "$original_path" ]] && ! /bin/rm -f "$original_path"; then
-        cleanup_failed=true
-    fi
-    /bin/rmdir "$state_dir" 2>/dev/null || true
-    /bin/rmdir "$(/usr/bin/dirname "$state_dir")" 2>/dev/null || true
-    [[ "$cleanup_failed" == false ]]
-}
+INTEL_HIDPI_STORAGE_CORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+# shellcheck source=lib/intel_hidpi_storage_support.sh
+source "${INTEL_HIDPI_STORAGE_CORE_DIR}/intel_hidpi_storage_support.sh" || return 1
+unset INTEL_HIDPI_STORAGE_CORE_DIR
 
 commit_apply_state() {
     local target_path="$1"
@@ -457,73 +12,132 @@ commit_apply_state() {
     local original_path="$6"
     local manifest_candidate_path="$7"
     local manifest_path="$8"
-    local state_dir="$9"
+    local candidate_hash="${9:-}"
+    local manifest_candidate_hash="${10:-}"
+    local original_identity="${11:-}"
+    local candidate_identity="${12:-}"
+    local manifest_candidate_identity="${13:-}"
+    local backup_expected_hash=""
+    local backup_candidate_identity=""
+    local backup_candidate_snapshot
+    local backup_candidate_hash
+    local installed_backup_snapshot
+    local installed_backup_hash
+    local installed_backup_identity
+    local installed_manifest_snapshot
+    local installed_manifest_hash
+    local installed_manifest_identity
+    local installed_target_snapshot
+    local installed_target_hash
+    local installed_target_identity
+    local target_install_status=0
 
-    if [[ "$target_existed" == true ]] && ! /bin/mv -f "$backup_candidate_path" "$original_path"; then
-        printf 'error: could not store exact original backup\n' >&2
-        return 1
-    fi
-    if ! /bin/mv -f "$manifest_candidate_path" "$manifest_path"; then
-        remove_apply_state "$manifest_path" "$original_path" "$state_dir" || printf 'error: could not install manifest and could not clean up state\n' >&2
-        return 1
-    fi
-    if ! target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash"; then
-        remove_apply_state "$manifest_path" "$original_path" "$state_dir" || printf 'error: target changed before apply and state cleanup failed\n' >&2
-        printf 'error: target changed after validation; no override was written\n' >&2
-        return 1
-    fi
-    if ! /bin/mv -f "$candidate_path" "$target_path"; then
-        remove_apply_state "$manifest_path" "$original_path" "$state_dir" || printf 'error: could not replace target and state cleanup failed\n' >&2
-        printf 'error: could not atomically replace target override\n' >&2
-        return 1
-    fi
-}
-
-read_revert_manifest() {
-    local manifest_path="$1"
-    local vendor_id="$2"
-    local product_id="$3"
-    local target_relative="$4"
-    local overrides_root="$5"
-    local manifest_version
-    local manifest_vendor
-    local manifest_product
-    local manifest_overrides_root
-    local manifest_relative
-    local manifest_native_resolution
-    local target_existed
-    local candidate_hash
-    local original_hash
-    local payload_count
-
-    /usr/bin/plutil -lint "$manifest_path" >/dev/null || return 1
-    manifest_version="$(/usr/bin/plutil -extract manifest-version raw -expect integer -o - "$manifest_path")" || return 1
-    [[ "$manifest_version" == "$MANIFEST_VERSION" ]] || return 2
-    manifest_vendor="$(/usr/bin/plutil -extract vendor-id raw -expect string -o - "$manifest_path")" || return 1
-    manifest_product="$(/usr/bin/plutil -extract product-id raw -expect string -o - "$manifest_path")" || return 1
-    manifest_overrides_root="$(/usr/bin/plutil -extract overrides-root raw -expect string -o - "$manifest_path")" || return 1
-    manifest_relative="$(/usr/bin/plutil -extract target-relative-path raw -expect string -o - "$manifest_path")" || return 1
-    manifest_native_resolution="$(/usr/bin/plutil -extract native-resolution raw -expect string -o - "$manifest_path")" || return 1
-    target_existed="$(/usr/bin/plutil -extract target-existed raw -expect bool -o - "$manifest_path")" || return 1
-    candidate_hash="$(/usr/bin/plutil -extract candidate-sha256 raw -expect string -o - "$manifest_path")" || return 1
-    original_hash="$(/usr/bin/plutil -extract original-sha256 raw -expect string -o - "$manifest_path")" || return 1
-    payload_count="$(/usr/bin/plutil -extract payloads raw -expect array -o - "$manifest_path")" || return 1
-
-    [[ "$manifest_vendor" == "$vendor_id" && "$manifest_product" == "$product_id" ]] || return 1
-    [[ "$manifest_overrides_root" == "$overrides_root" ]] || return 3
-    [[ "$manifest_relative" == "$target_relative" ]] || return 1
-    parse_resolution "$manifest_native_resolution" >/dev/null || return 1
     [[ "$target_existed" == true || "$target_existed" == false ]] || return 1
     valid_sha256 "$candidate_hash" || return 1
-    [[ "$payload_count" =~ ^[1-9][0-9]*$ ]] || return 1
-
+    valid_sha256 "$manifest_candidate_hash" || return 1
+    valid_file_identity "$candidate_identity" || return 1
+    valid_file_identity "$manifest_candidate_identity" || return 1
+    file_matches_snapshot "$candidate_path" "$candidate_hash" "$candidate_identity" || {
+        printf 'error: target candidate changed before state commit; no override was written\n' >&2
+        return 1
+    }
+    file_matches_snapshot "$manifest_candidate_path" "$manifest_candidate_hash" "$manifest_candidate_identity" || {
+        printf 'error: could not install verified manifest without replacement; state was retained for manual inspection\n' >&2
+        return 1
+    }
     if [[ "$target_existed" == true ]]; then
         valid_sha256 "$original_hash" || return 1
+        valid_file_identity "$original_identity" || return 1
+        backup_expected_hash="$original_hash"
+        backup_candidate_snapshot="$(darwin_file_snapshot "$backup_candidate_path")" || return 1
+        IFS='|' read -r backup_candidate_hash backup_candidate_identity <<< "$backup_candidate_snapshot"
+        [[ "$backup_candidate_hash" == "$backup_expected_hash" ]] || return 1
+        valid_file_identity "$backup_candidate_identity" || return 1
+        file_matches_snapshot "$backup_candidate_path" "$backup_expected_hash" "$backup_candidate_identity" || {
+            printf 'error: original backup candidate changed before state commit; no override was written\n' >&2
+            return 1
+        }
+        target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity" || {
+            printf 'error: target changed after validation; no override was written and state was retained for manual inspection\n' >&2
+            return 1
+        }
     else
-        [[ -z "$original_hash" ]] || return 1
+        target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity" || {
+            printf 'error: target changed after validation; no override was written and state was retained for manual inspection\n' >&2
+            return 1
+        }
     fi
-
-    printf '%s|%s|%s\n' "$target_existed" "$candidate_hash" "$original_hash"
+    if [[ "$target_existed" == true ]]; then
+        if ! installed_backup_snapshot="$(install_file_without_replacement "$backup_candidate_path" "$original_path" "$backup_expected_hash" "$backup_candidate_identity")"; then
+            printf 'error: could not store exact original backup without replacement\n' >&2
+            return 1
+        fi
+        IFS='|' read -r installed_backup_hash installed_backup_identity <<< "$installed_backup_snapshot"
+        [[ "$installed_backup_hash" == "$backup_expected_hash" ]] || return 1
+        valid_file_identity "$installed_backup_identity" || return 1
+        file_matches_snapshot "$original_path" "$backup_expected_hash" "$installed_backup_identity" || return 1
+    fi
+    if ! installed_manifest_snapshot="$(install_file_without_replacement "$manifest_candidate_path" "$manifest_path" "$manifest_candidate_hash" "$manifest_candidate_identity")"; then
+        printf 'error: could not install verified manifest without replacement; state was retained for manual inspection\n' >&2
+        return 1
+    fi
+    IFS='|' read -r installed_manifest_hash installed_manifest_identity <<< "$installed_manifest_snapshot"
+    [[ "$installed_manifest_hash" == "$manifest_candidate_hash" ]] || return 1
+    valid_file_identity "$installed_manifest_identity" || return 1
+    if [[ "$target_existed" == true ]]; then
+        record_pending_manifest_original_identity "$manifest_path" "$installed_manifest_hash" "$installed_manifest_identity" "$installed_backup_identity" || {
+            printf 'error: original backup was stored but manifest identity could not be committed; state was retained for manual inspection\n' >&2
+            return 1
+        }
+        installed_manifest_hash="$PLIST_OPERATION_HASH"
+        installed_manifest_identity="$PLIST_OPERATION_IDENTITY"
+        file_matches_snapshot "$original_path" "$backup_expected_hash" "$installed_backup_identity" || {
+            printf 'error: original backup changed before target commit; state was retained for manual inspection\n' >&2
+            return 1
+        }
+    fi
+    if ! target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity"; then
+        printf 'error: target changed after validation; no override was written and state was retained for manual inspection\n' >&2
+        return 1
+    fi
+    if [[ "$target_existed" == false ]]; then
+        installed_target_snapshot="$(install_file_without_replacement "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity")"
+        target_install_status=$?
+        if ((target_install_status != 0)); then
+            if ((target_install_status == 2)); then
+                printf 'error: target installation may have completed before verification failed; state was retained for manual inspection\n' >&2
+            else
+                printf 'error: could not atomically install a new target override without replacement; state was retained for manual inspection\n' >&2
+            fi
+            return 1
+        fi
+    else
+        installed_target_snapshot="$(replace_file_without_following_directory_link "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity" "$original_hash" "$original_identity")"
+        target_install_status=$?
+        if ((target_install_status != 0)); then
+            if ((target_install_status == 2)); then
+                printf 'error: target replacement may have completed before verification or cleanup failed; state was retained for manual inspection\n' >&2
+            else
+                printf 'error: could not atomically replace target override; state was retained for manual inspection\n' >&2
+            fi
+            return 1
+        fi
+    fi
+    IFS='|' read -r installed_target_hash installed_target_identity <<< "$installed_target_snapshot"
+    [[ "$installed_target_hash" == "$candidate_hash" ]] || return 1
+    valid_file_identity "$installed_target_identity" || return 1
+    file_matches_snapshot "$target_path" "$candidate_hash" "$installed_target_identity" || {
+        printf 'error: target changed immediately after installation; state was retained for manual inspection\n' >&2
+        return 1
+    }
+    finalize_pending_manifest "$manifest_path" "$installed_manifest_hash" "$installed_manifest_identity" "$installed_target_identity" || {
+        printf 'error: target was installed but manifest identity could not be committed; state was retained for manual inspection\n' >&2
+        return 1
+    }
+    file_matches_snapshot "$target_path" "$candidate_hash" "$installed_target_identity" || {
+        printf 'error: target changed while finalizing manifest; state was retained for manual inspection\n' >&2
+        return 1
+    }
 }
 
 apply_override() {
@@ -547,7 +161,12 @@ apply_override() {
     local manifest_path
     local target_existed=false
     local original_hash=""
+    local original_identity=""
+    local original_snapshot
     local candidate_hash
+    local candidate_identity
+    local manifest_candidate_hash
+    local manifest_candidate_identity
     local overrides_are_system_paths=false
     local state_is_system_path=false
 
@@ -568,39 +187,75 @@ apply_override() {
     manifest_path="${state_dir}/manifest.plist"
 
     path_has_disallowed_symbolic_link "$target_path" && fail "target path traverses a symbolic link"
-    path_has_disallowed_symbolic_link "$state_dir" && fail "state path traverses a symbolic link"
+    if path_has_disallowed_symbolic_link "$state_dir" ||
+        path_has_disallowed_symbolic_link "$manifest_path" ||
+        path_has_disallowed_symbolic_link "$original_path"; then
+        fail "state files traverse a symbolic link"
+    fi
     reset_operation_cleanup_state
     acquire_display_lock "$overrides_root" "$vendor_id" "$product_id" || fail "could not acquire display operation lock"
-    [[ ! -e "$manifest_path" && ! -e "$original_path" ]] || fail "existing state requires manual inspection before another apply"
-    directory_is_empty "$state_dir" || fail "state directory must be empty before apply"
+    path_has_disallowed_symbolic_link "$target_path" && fail "target path traverses a symbolic link"
+    if path_has_disallowed_symbolic_link "$state_dir" ||
+        path_has_disallowed_symbolic_link "$manifest_path" ||
+        path_has_disallowed_symbolic_link "$original_path"; then
+        fail "target or state files traverse a symbolic link"
+    fi
     ensure_directory_path_without_symlinks "$target_dir" || fail "could not create target directory safely"
     ensure_directory_path_without_symlinks "$state_dir" || fail "could not create state directory safely"
-    create_temporary_file "$target_dir" "DisplayProductID-${product_id}.candidate" || fail "could not create target candidate"
+    [[ ! -e "$manifest_path" && ! -L "$manifest_path" && ! -e "$original_path" && ! -L "$original_path" ]] || fail "existing state requires manual inspection before another apply"
+    directory_is_empty "$state_dir" || fail "state directory must be empty before apply"
+    create_operation_temporary_directory || fail "could not create private operation directory"
+    create_temporary_file "DisplayProductID-${product_id}.candidate" || fail "could not create target candidate"
     candidate_path="$TEMPORARY_FILE"
 
-    if [[ -f "$target_path" ]]; then
+    if [[ -f "$target_path" && ! -L "$target_path" ]]; then
         target_existed=true
-        create_temporary_file "$state_dir" "original.plist" || fail "could not create original backup candidate"
+        create_temporary_file "original.plist" || fail "could not create original backup candidate"
         backup_candidate_path="$TEMPORARY_FILE"
-        /bin/cp -p "$target_path" "$backup_candidate_path" || fail "could not create exact original backup"
-        original_hash="$(sha256_file "$backup_candidate_path")" || fail "could not hash original override"
-        /bin/cp "$target_path" "$candidate_path" || fail "could not create candidate override"
-    elif [[ -e "$target_path" ]]; then
+        original_snapshot="$(darwin_file_snapshot "$target_path")" || fail "could not snapshot original override"
+        IFS='|' read -r original_hash original_identity <<< "$original_snapshot"
+        valid_sha256 "$original_hash" || fail "could not snapshot original override"
+        valid_file_identity "$original_identity" || fail "could not identify original override"
+        copy_file_and_verify_hash "$target_path" "$backup_candidate_path" "$original_hash" "$original_identity" || fail "could not create exact original backup"
+        copy_file_and_verify_hash "$target_path" "$candidate_path" "$original_hash" "$original_identity" || fail "could not create candidate override"
+    elif [[ -e "$target_path" || -L "$target_path" ]]; then
         fail "target override exists but is not a regular file"
     else
-        create_base_override "$candidate_path" "$vendor_decimal" "$product_decimal" || fail "could not create base override"
+        candidate_hash="$(temporary_file_expected_hash "$candidate_path")" || fail "could not verify base override candidate"
+        candidate_identity="$(temporary_file_expected_identity "$candidate_path")" || fail "could not verify base override candidate"
+        create_base_override "$candidate_path" "$vendor_decimal" "$product_decimal" "$candidate_hash" "$candidate_identity" || fail "could not create base override"
+        candidate_hash="$PLIST_OPERATION_HASH"
+        candidate_identity="$PLIST_OPERATION_IDENTITY"
+        record_temporary_file_snapshot "$candidate_path" "$candidate_hash" "$candidate_identity" || fail "could not verify base override candidate"
     fi
 
-    append_missing_payloads "$candidate_path" "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" || fail "could not merge generated modes"
-    validate_candidate_override "$candidate_path" "$vendor_decimal" "$product_decimal" || fail "candidate override did not validate"
-    set_written_file_permissions "$candidate_path" "$overrides_are_system_paths" || fail "could not set candidate permissions"
-    candidate_hash="$(sha256_file "$candidate_path")" || fail "could not hash candidate override"
-    create_temporary_file "$state_dir" "manifest.plist" || fail "could not create manifest candidate"
+    candidate_hash="$(temporary_file_expected_hash "$candidate_path")" || fail "could not verify target candidate before mode merge"
+    candidate_identity="$(temporary_file_expected_identity "$candidate_path")" || fail "could not verify target candidate before mode merge"
+    append_missing_payloads "$candidate_path" "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" "$candidate_hash" "$candidate_identity" || fail "could not merge generated modes"
+    candidate_hash="$PLIST_OPERATION_HASH"
+    candidate_identity="$PLIST_OPERATION_IDENTITY"
+    validate_candidate_override "$candidate_path" "$candidate_hash" "$candidate_identity" "$vendor_decimal" "$product_decimal" || fail "candidate override did not validate"
+    set_written_file_permissions "$candidate_path" "$overrides_are_system_paths" "$candidate_hash" "$candidate_identity" || fail "could not set candidate permissions"
+    candidate_hash="$PLIST_OPERATION_HASH"
+    candidate_identity="$PLIST_OPERATION_IDENTITY"
+    record_temporary_file_snapshot "$candidate_path" "$candidate_hash" "$candidate_identity" || fail "could not verify target candidate"
+    create_temporary_file "manifest.plist" || fail "could not create manifest candidate"
     manifest_candidate_path="$TEMPORARY_FILE"
-    write_manifest "$manifest_candidate_path" "$candidate_path" "$overrides_root" "$target_relative" "$target_existed" "$vendor_id" "$product_id" "$native_resolution" "$original_hash" "$candidate_hash" || fail "could not write manifest"
-    set_written_file_permissions "$manifest_candidate_path" "$state_is_system_path" || fail "could not set manifest permissions"
-    commit_apply_state "$target_path" "$candidate_path" "$target_existed" "$original_hash" "$backup_candidate_path" "$original_path" "$manifest_candidate_path" "$manifest_path" "$state_dir" || fail "apply did not complete; target override was not replaced"
-    complete_operation_cleanup || fail "apply completed but could not release display operation lock"
+    manifest_candidate_hash="$(temporary_file_expected_hash "$manifest_candidate_path")" || fail "could not verify manifest candidate"
+    manifest_candidate_identity="$(temporary_file_expected_identity "$manifest_candidate_path")" || fail "could not verify manifest candidate"
+    write_manifest "$manifest_candidate_path" "$candidate_path" "$overrides_root" "$target_relative" "$target_existed" "$vendor_id" "$product_id" "$native_resolution" "$original_hash" "$candidate_hash" "$candidate_identity" "$manifest_candidate_hash" "$manifest_candidate_identity" || fail "could not write manifest"
+    manifest_candidate_hash="$PLIST_OPERATION_HASH"
+    manifest_candidate_identity="$PLIST_OPERATION_IDENTITY"
+    set_written_file_permissions "$manifest_candidate_path" "$state_is_system_path" "$manifest_candidate_hash" "$manifest_candidate_identity" || fail "could not set manifest permissions"
+    manifest_candidate_hash="$PLIST_OPERATION_HASH"
+    manifest_candidate_identity="$PLIST_OPERATION_IDENTITY"
+    record_temporary_file_snapshot "$manifest_candidate_path" "$manifest_candidate_hash" "$manifest_candidate_identity" || fail "could not verify manifest candidate"
+    commit_apply_state "$target_path" "$candidate_path" "$target_existed" "$original_hash" "$backup_candidate_path" "$original_path" "$manifest_candidate_path" "$manifest_path" "$candidate_hash" "$manifest_candidate_hash" "$original_identity" "$candidate_identity" "$manifest_candidate_identity" || fail "apply did not complete; recovery state was retained for manual inspection"
+    forget_created_directories_within "$overrides_root"
+    forget_created_directories_within "$state_root"
+    forget_created_directories_ancestors_of "$overrides_root"
+    forget_created_directories_ancestors_of "$state_root"
+    complete_operation_cleanup || fail "apply committed but temporary artifact or operation lock cleanup failed"
 
     printf 'applied=%s\n' "$target_relative"
     printf 'manifest=%s\n' "$manifest_path"
@@ -614,17 +269,34 @@ revert_override() {
     local confirmed="$5"
     local target_path
     local state_dir
+    local state_dir_identity
+    local state_parent_dir
+    local state_parent_identity
     local manifest_path
     local original_path
     local target_dir
     local target_relative
     local target_existed
     local manifest_metadata
+    local manifest_hash
+    local manifest_identity
     local candidate_hash
+    local candidate_identity
     local original_hash
-    local current_hash
+    local original_identity
+    local backup_snapshot
+    local target_identity
+    local target_snapshot
+    local target_hash
     local backup_hash
+    local backup_identity
     local restore_candidate_path
+    local restore_candidate_identity
+    local restored_target_snapshot
+    local restored_target_hash
+    local restored_target_identity
+    local restore_status=0
+    local target_present=false
 
     [[ "$confirmed" == true ]] || fail "revert requires --confirm"
     vendor_id="$(normalize_hex_id "$vendor_id")" || fail "vendor id must be hexadecimal"
@@ -640,9 +312,26 @@ revert_override() {
     original_path="${state_dir}/original.plist"
 
     path_has_disallowed_symbolic_link "$target_path" && fail "target path traverses a symbolic link"
-    path_has_disallowed_symbolic_link "$state_dir" && fail "state path traverses a symbolic link"
+    if path_has_disallowed_symbolic_link "$state_dir" ||
+        path_has_disallowed_symbolic_link "$manifest_path" ||
+        path_has_disallowed_symbolic_link "$original_path"; then
+        fail "state files traverse a symbolic link"
+    fi
     reset_operation_cleanup_state
     acquire_display_lock "$overrides_root" "$vendor_id" "$product_id" || fail "could not acquire display operation lock"
+    path_has_disallowed_symbolic_link "$target_path" && fail "target path traverses a symbolic link"
+    if path_has_disallowed_symbolic_link "$state_dir" ||
+        path_has_disallowed_symbolic_link "$manifest_path" ||
+        path_has_disallowed_symbolic_link "$original_path"; then
+        fail "target or state files traverse a symbolic link"
+    fi
+    ensure_directory_path_without_symlinks "$target_dir" || fail "could not prepare target directory safely"
+    ensure_directory_path_without_symlinks "$state_dir" || fail "could not prepare state directory safely"
+    state_dir_identity="$(darwin_directory_identity "$state_dir")" || fail "could not identify state directory safely"
+    valid_file_identity "$state_dir_identity" || fail "could not identify state directory safely"
+    state_parent_dir="$(/usr/bin/dirname "$state_dir")"
+    state_parent_identity="$(darwin_directory_identity "$state_parent_dir")" || fail "could not identify state parent directory safely"
+    valid_file_identity "$state_parent_identity" || fail "could not identify state parent directory safely"
     [[ -f "$manifest_path" ]] || fail "no manifest exists for this target"
     if manifest_metadata="$(read_revert_manifest "$manifest_path" "$vendor_id" "$product_id" "$target_relative" "$overrides_root")"; then
         :
@@ -654,38 +343,111 @@ revert_override() {
         3)
             fail "manifest override root does not match this target"
             ;;
+        4)
+            fail "manifest changed while it was being read; refusing to revert"
+            ;;
+        5)
+            fail "manifest apply state is incomplete; refusing to revert automatically"
+            ;;
         *)
             fail "manifest is invalid or does not match this display"
             ;;
         esac
     fi
-    IFS='|' read -r target_existed candidate_hash original_hash <<< "$manifest_metadata"
-    [[ -f "$target_path" ]] || fail "target override is missing; refusing to alter state"
-    current_hash="$(sha256_file "$target_path")" || fail "could not hash current target override"
-    [[ "$current_hash" == "$candidate_hash" ]] || fail "target override changed after apply; refusing to overwrite it"
+    IFS='|' read -r target_existed candidate_hash candidate_identity original_hash original_identity manifest_hash manifest_identity <<< "$manifest_metadata"
+
+    case "$target_existed" in
+    true)
+        [[ -f "$original_path" && ! -L "$original_path" ]] || fail "original backup is missing"
+        backup_snapshot="$(darwin_file_snapshot "$original_path")" || fail "could not snapshot original backup"
+        IFS='|' read -r backup_hash backup_identity <<< "$backup_snapshot"
+        valid_sha256 "$backup_hash" || fail "could not snapshot original backup"
+        valid_file_identity "$backup_identity" || fail "could not snapshot original backup"
+        [[ "$backup_hash" == "$original_hash" ]] || fail "original backup changed after apply; refusing to restore it"
+        [[ "$backup_identity" == "$original_identity" ]] || fail "original backup identity changed after apply; refusing to restore it"
+        plist_file_is_valid "$original_path" "$backup_hash" "$backup_identity" || fail "original backup is invalid or changed after apply; refusing to restore it"
+        file_matches_snapshot "$original_path" "$original_hash" "$original_identity" || fail "original backup changed after apply; refusing to restore it"
+        ;;
+    false)
+        [[ ! -e "$original_path" && ! -L "$original_path" ]] || fail "unexpected original backup exists for a created target"
+        ;;
+    *)
+        fail "manifest target state is invalid"
+        ;;
+    esac
+
+    if [[ -e "$target_path" || -L "$target_path" ]]; then
+        [[ -f "$target_path" && ! -L "$target_path" ]] || fail "target override is not a regular file"
+        target_present=true
+        target_snapshot="$(darwin_file_snapshot "$target_path")" || fail "could not snapshot current target override"
+        IFS='|' read -r target_hash target_identity <<< "$target_snapshot"
+        valid_sha256 "$target_hash" || fail "could not snapshot current target override"
+        valid_file_identity "$target_identity" || fail "could not snapshot current target override"
+        [[ "$target_hash" == "$candidate_hash" ]] || fail "target override changed after apply; refusing to overwrite it"
+        [[ "$target_identity" == "$candidate_identity" ]] || fail "target override identity changed after apply; refusing to overwrite it"
+        file_matches_snapshot "$target_path" "$candidate_hash" "$candidate_identity" || fail "target override changed after apply; refusing to overwrite it"
+    fi
+    file_matches_snapshot "$manifest_path" "$manifest_hash" "$manifest_identity" || fail "manifest changed before reverting target; retaining state"
 
     if [[ "$target_existed" == true ]]; then
-        [[ -f "$original_path" ]] || fail "original backup is missing"
-        /usr/bin/plutil -lint "$original_path" >/dev/null || fail "original backup is invalid"
-        backup_hash="$(sha256_file "$original_path")" || fail "could not hash original backup"
-        [[ "$backup_hash" == "$original_hash" ]] || fail "original backup changed after apply; refusing to restore it"
-        create_temporary_file "$target_dir" "DisplayProductID-${product_id}.restore" || fail "could not create restore candidate"
+        ensure_directory_path_without_symlinks "$target_dir" || fail "could not prepare target directory safely"
+        create_operation_temporary_directory || fail "could not create private operation directory"
+        create_temporary_file "DisplayProductID-${product_id}.restore" || fail "could not create restore candidate"
         restore_candidate_path="$TEMPORARY_FILE"
-        /bin/cp -p "$original_path" "$restore_candidate_path" || fail "could not prepare exact restore candidate"
-        /bin/mv -f "$restore_candidate_path" "$target_path" || fail "could not atomically restore original override"
+        copy_file_and_verify_hash "$original_path" "$restore_candidate_path" "$original_hash" "$backup_identity" || fail "could not prepare an exact verified restore candidate"
+        restore_candidate_identity="$(temporary_file_expected_identity "$restore_candidate_path")" || fail "could not verify restore candidate"
+        if [[ "$target_present" == true ]]; then
+            restored_target_snapshot="$(replace_file_without_following_directory_link "$restore_candidate_path" "$target_path" "$original_hash" "$restore_candidate_identity" "$candidate_hash" "$target_identity")"
+            restore_status=$?
+            if ((restore_status != 0)); then
+                if ((restore_status == 2)); then
+                    fail "restore may have replaced the target before verification or cleanup failed; state was retained for manual inspection"
+                fi
+                fail "could not atomically restore original override"
+            fi
+        else
+            restored_target_snapshot="$(install_file_without_replacement "$restore_candidate_path" "$target_path" "$original_hash" "$restore_candidate_identity")"
+            restore_status=$?
+            if ((restore_status != 0)); then
+                if ((restore_status == 2)); then
+                    fail "restore may have created the target before verification failed; state was retained for manual inspection"
+                fi
+                fail "target appeared while restoring the original override"
+            fi
+        fi
+        IFS='|' read -r restored_target_hash restored_target_identity <<< "$restored_target_snapshot"
+        [[ "$restored_target_hash" == "$original_hash" ]] || fail "restored target does not match the original backup; retaining state"
+        valid_file_identity "$restored_target_identity" || fail "could not identify restored target override"
+        file_matches_snapshot "$target_path" "$original_hash" "$restored_target_identity" || fail "restored target changed immediately after installation; retaining state"
     elif [[ "$target_existed" == false ]]; then
-        /bin/rm -f "$target_path" || fail "could not remove created target override"
-    else
-        fail "manifest target state is invalid"
+        if [[ "$target_present" == true ]]; then
+            remove_file_if_unchanged "$target_path" "$candidate_hash" "$candidate_identity" || fail "could not remove the unchanged created target override"
+        fi
+        [[ ! -e "$target_path" && ! -L "$target_path" ]] || fail "created target appeared during revert; retaining state"
     fi
 
-    if [[ "$target_existed" == true ]] && ! /bin/rm -f "$original_path"; then
-        fail "override was restored but original backup could not be removed"
+    if [[ "$target_existed" == false ]] && [[ -e "$original_path" || -L "$original_path" ]]; then
+        fail "unexpected original backup appeared during revert; retaining state"
     fi
-    /bin/rm -f "$manifest_path" || fail "override was reverted but manifest could not be removed"
-    /bin/rmdir "$state_dir" 2>/dev/null || true
-    /bin/rmdir "$(/usr/bin/dirname "$state_dir")" 2>/dev/null || true
-    complete_operation_cleanup || fail "revert completed but could not release display operation lock"
+
+    if [[ "$target_existed" == true ]]; then
+        file_matches_snapshot "$target_path" "$original_hash" "$restored_target_identity" || fail "restored target changed before state cleanup; retaining state"
+        file_matches_snapshot "$original_path" "$original_hash" "$original_identity" || fail "original backup changed before cleanup; retaining state"
+        remove_file_if_unchanged "$original_path" "$original_hash" "$original_identity" || fail "override was restored but original backup could not be removed"
+        forget_created_directories_within "$overrides_root"
+    fi
+    if [[ "$target_existed" == false ]]; then
+        [[ ! -e "$target_path" && ! -L "$target_path" ]] || fail "created target appeared before state cleanup; retaining state"
+    fi
+    file_matches_snapshot "$manifest_path" "$manifest_hash" "$manifest_identity" || fail "manifest changed before state cleanup; retaining state"
+    remove_file_if_unchanged "$manifest_path" "$manifest_hash" "$manifest_identity" || fail "override was reverted but manifest could not be removed"
+    if ! darwin_remove_empty_directory_if_unchanged "$state_dir" "$state_dir_identity"; then
+        printf 'warning: state directory was retained because it changed or is not empty: %s\n' "$state_dir" >&2
+    fi
+    if ! darwin_remove_empty_directory_if_unchanged "$state_parent_dir" "$state_parent_identity"; then
+        printf 'warning: state parent directory was retained because it changed or is not empty: %s\n' "$state_parent_dir" >&2
+    fi
+    complete_operation_cleanup || fail "revert committed but temporary artifact or operation lock cleanup failed"
 
     printf 'reverted=%s\n' "$target_relative"
 }
