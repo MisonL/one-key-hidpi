@@ -616,8 +616,10 @@ darwin_secure_fs() {
             staged_fd = copy_fd_to_new_file(source_fd, target_directory_fd, staged_name)
             Failure.raise_failure unless expected_sha256?(staged_fd, expected_source_hash)
             staged_identity = file_identity(staged_fd)
-            staged_path_matches = path_still_names_fd?(target_directory_fd, staged_name, staged_fd)
-            target_path_matches = path_still_names_fd?(target_directory_fd, target_name, target_fd)
+            staged_path_matches = path_still_names_fd?(target_directory_fd, staged_name, staged_fd) &&
+                expected_sha256?(staged_fd, expected_source_hash)
+            target_path_matches = path_still_names_fd?(target_directory_fd, target_name, target_fd) &&
+                expected_sha256?(target_fd, expected_target_hash)
             unless staged_path_matches && target_path_matches
                 staged_removed = false
                 if staged_path_matches

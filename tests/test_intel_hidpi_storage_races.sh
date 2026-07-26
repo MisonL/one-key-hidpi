@@ -148,6 +148,24 @@ find_ruby_holding_path() {
     return 1
 }
 
+wait_for_stopped_process() {
+    local process_id="$1"
+    local wait_seconds="$2"
+    local process_state
+    local deadline
+
+    [[ "$process_id" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "$wait_seconds" =~ ^[1-9][0-9]*$ ]] || return 1
+    deadline=$((SECONDS + wait_seconds))
+
+    while ((SECONDS < deadline)); do
+        process_state="$(/bin/ps -p "$process_id" -o stat= 2>/dev/null)" || return 1
+        [[ "$process_state" == *T* ]] && return 0
+        /bin/sleep 0.05
+    done
+    return 1
+}
+
 lsof_reports_open_path() {
     local process_id="$1"
     local path="$2"
@@ -204,6 +222,9 @@ install_race_ruby_stopped=false
 remove_race_ruby_pid=""
 remove_race_ruby_stopped=false
 remove_race_worker_pid=""
+replace_content_race_worker_pid=""
+replace_content_race_ruby_pid=""
+replace_content_race_ruby_stopped=false
 alias_lock_real_root=""
 
 cleanup() {
@@ -226,6 +247,16 @@ cleanup() {
             /bin/kill -TERM "$remove_race_ruby_pid" 2>/dev/null || true
         fi
         wait "$remove_race_worker_pid" 2>/dev/null || true
+    fi
+    if [[ "$replace_content_race_ruby_stopped" == true && -n "$replace_content_race_ruby_pid" ]]; then
+        /bin/kill -CONT "$replace_content_race_ruby_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$replace_content_race_worker_pid" ]] && /bin/kill -0 "$replace_content_race_worker_pid" 2>/dev/null; then
+        /bin/kill -TERM "$replace_content_race_worker_pid" 2>/dev/null || true
+        if [[ -n "$replace_content_race_ruby_pid" ]] && /bin/kill -0 "$replace_content_race_ruby_pid" 2>/dev/null; then
+            /bin/kill -TERM "$replace_content_race_ruby_pid" 2>/dev/null || true
+        fi
+        wait "$replace_content_race_worker_pid" 2>/dev/null || true
     fi
     case "$alias_lock_real_root" in
     /private/tmp/one-key-hidpi-alias-lock-*)
@@ -815,6 +846,139 @@ pre_swap_directory_stage_path="$(/usr/bin/find "$(/usr/bin/dirname "$pre_swap_di
 assert_directory_exists "$pre_swap_directory_stage_path"
 assert_file_contents "$pre_swap_directory_stage_path/sentinel" "competing pre-swap staged directory"
 
+pre_swap_content_root="$scratch_dir/pre-swap-content"
+pre_swap_content_candidate_path="$pre_swap_content_root/candidate"
+pre_swap_content_target_path="$pre_swap_content_root/target"
+/bin/mkdir -p "$pre_swap_content_root" || fail "could not create pre-swap content race directory"
+/usr/sbin/mkfile -n "$REMOVE_RACE_FIXTURE_SIZE" "$pre_swap_content_candidate_path" || fail "could not create pre-swap content race candidate"
+printf 'original target\n' > "$pre_swap_content_target_path"
+pre_swap_content_candidate_hash="$(sha256_file "$pre_swap_content_candidate_path")"
+pre_swap_content_target_identity="$(file_identity "$pre_swap_content_target_path")"
+pre_swap_content_worker_output="$pre_swap_content_root/worker-output"
+/bin/bash -c '
+    source "$1"
+    candidate_path="$2"
+    target_path="$3"
+    target_hash="$(sha256_file "$target_path")"
+    candidate_hash="$(sha256_file "$candidate_path")"
+    target_identity="$(darwin_file_identity "$target_path")"
+    candidate_identity="$(darwin_file_identity "$candidate_path")"
+    replace_file_without_following_directory_link "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity" "$target_hash" "$target_identity"
+    exit $?
+' bash "$repo_dir/lib/intel_hidpi_storage.sh" "$pre_swap_content_candidate_path" "$pre_swap_content_target_path" >"$pre_swap_content_worker_output" 2>&1 &
+replace_content_race_worker_pid=$!
+replace_content_race_ruby_pid="$(find_ruby_holding_path "$replace_content_race_worker_pid" "$pre_swap_content_target_path" "$INSTALL_IDENTITY_RACE_WAIT_SECONDS")" || {
+    /bin/kill -TERM "$replace_content_race_worker_pid" 2>/dev/null || true
+    wait "$replace_content_race_worker_pid" 2>/dev/null || true
+    replace_content_race_worker_pid=""
+    fail "could not observe replacement holding the target before the content race"
+}
+pre_swap_content_stage_path=""
+pre_swap_content_deadline=$((SECONDS + REMOVE_RACE_WAIT_SECONDS))
+while ((SECONDS < pre_swap_content_deadline)); do
+    for staged_path in "$pre_swap_content_root"/.one-key-hidpi-stage-*; do
+        [[ -f "$staged_path" && ! -L "$staged_path" ]] || continue
+        target_first_byte="$(/usr/bin/od -An -tx1 -N1 "$pre_swap_content_target_path" | /usr/bin/tr -d '[:space:]')" || continue
+        [[ "$target_first_byte" == "6f" ]] || continue
+        /bin/kill -STOP "$replace_content_race_ruby_pid" || fail "could not pause replacement before the first swap"
+        replace_content_race_ruby_stopped=true
+        target_first_byte="$(/usr/bin/od -An -tx1 -N1 "$pre_swap_content_target_path" | /usr/bin/tr -d '[:space:]')" || fail "could not inspect paused replacement target"
+        [[ "$target_first_byte" == "6f" ]] || fail "replacement advanced beyond the first swap before it could be paused"
+        pre_swap_content_stage_path="$staged_path"
+        break 2
+    done
+    /bin/sleep 0.01
+done
+[[ -n "$pre_swap_content_stage_path" ]] || fail "could not observe a staged replacement before the first swap"
+printf 'competing target\n' > "$pre_swap_content_target_path" || fail "could not mutate target contents during the pre-swap race"
+[[ "$(file_identity "$pre_swap_content_target_path")" == "$pre_swap_content_target_identity" ]] || fail "pre-swap target mutation must retain the target inode"
+/bin/kill -CONT "$replace_content_race_ruby_pid" || fail "could not resume replacement after the content race"
+replace_content_race_ruby_stopped=false
+if wait "$replace_content_race_worker_pid"; then
+    replace_content_race_worker_pid=""
+    fail "replacement must reject a target changed in place before the first swap"
+fi
+replace_content_race_worker_pid=""
+pre_swap_content_output="$(/bin/cat "$pre_swap_content_worker_output")"
+assert_contains "$pre_swap_content_output" "replacement did not start because target changed before swap"
+assert_file_contents "$pre_swap_content_target_path" "competing target"
+[[ "$(file_identity "$pre_swap_content_target_path")" == "$pre_swap_content_target_identity" ]] || fail "in-place target mutation must retain the target inode"
+assert_file_hash "$pre_swap_content_candidate_path" "$pre_swap_content_candidate_hash"
+pre_swap_content_remaining_stage_path="$(/usr/bin/find "$pre_swap_content_root" -maxdepth 1 -name '.one-key-hidpi-stage-*' -print -quit)" || fail "could not inspect pre-swap content race directory"
+[[ -z "$pre_swap_content_remaining_stage_path" ]] || fail "unchanged staged candidate must be cleaned after a target content race"
+
+pre_swap_staged_content_root="$scratch_dir/pre-swap-staged-content"
+pre_swap_staged_content_candidate_path="$pre_swap_staged_content_root/candidate"
+pre_swap_staged_content_target_path="$pre_swap_staged_content_root/target"
+/bin/mkdir -p "$pre_swap_staged_content_root" || fail "could not create pre-swap staged-content race directory"
+/usr/sbin/mkfile -n "$REMOVE_RACE_FIXTURE_SIZE" "$pre_swap_staged_content_candidate_path" || fail "could not create pre-swap staged-content race candidate"
+printf 'original target\n' > "$pre_swap_staged_content_target_path"
+pre_swap_staged_content_candidate_hash="$(sha256_file "$pre_swap_staged_content_candidate_path")"
+pre_swap_staged_content_target_hash="$(sha256_file "$pre_swap_staged_content_target_path")"
+pre_swap_staged_content_worker_output="$pre_swap_staged_content_root/worker-output"
+pre_swap_staged_content_darwin_fs_path="$pre_swap_staged_content_root/intel_hidpi_darwin_fs.sh"
+# Use a temporary copy of the FFI helper to stop immediately after the initial
+# staged-content hash. This lets the fixture exercise the second pre-swap hash
+# without racing the descriptor-bound copy itself.
+/usr/bin/awk '
+    /^[[:space:]]*Failure\.raise_failure unless expected_sha256\?\(staged_fd, expected_source_hash\)$/ {
+        count += 1
+        print
+        print "            Process.kill(\"STOP\", Process.pid)"
+        next
+    }
+    { print }
+    END { exit(count == 1 ? 0 : 1) }
+' "$repo_dir/lib/intel_hidpi_darwin_fs.sh" > "$pre_swap_staged_content_darwin_fs_path" || fail "could not prepare staged-content race helper"
+/bin/bash -c '
+    source "$1"
+    source "$2"
+    candidate_path="$3"
+    target_path="$4"
+    target_hash="$(sha256_file "$target_path")"
+    candidate_hash="$(sha256_file "$candidate_path")"
+    target_identity="$(darwin_file_identity "$target_path")"
+    candidate_identity="$(darwin_file_identity "$candidate_path")"
+    replace_file_without_following_directory_link "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity" "$target_hash" "$target_identity"
+    exit $?
+' bash "$repo_dir/lib/intel_hidpi_storage.sh" "$pre_swap_staged_content_darwin_fs_path" "$pre_swap_staged_content_candidate_path" "$pre_swap_staged_content_target_path" >"$pre_swap_staged_content_worker_output" 2>&1 &
+replace_content_race_worker_pid=$!
+replace_content_race_ruby_pid="$(find_ruby_holding_path "$replace_content_race_worker_pid" "$pre_swap_staged_content_target_path" "$INSTALL_IDENTITY_RACE_WAIT_SECONDS")" || {
+    /bin/kill -TERM "$replace_content_race_worker_pid" 2>/dev/null || true
+    wait "$replace_content_race_worker_pid" 2>/dev/null || true
+    replace_content_race_worker_pid=""
+    fail "could not observe replacement holding the target before the staged-content race"
+}
+wait_for_stopped_process "$replace_content_race_ruby_pid" "$INSTALL_IDENTITY_RACE_WAIT_SECONDS" || {
+    /bin/kill -TERM "$replace_content_race_worker_pid" 2>/dev/null || true
+    /bin/kill -CONT "$replace_content_race_ruby_pid" 2>/dev/null || true
+    wait "$replace_content_race_worker_pid" 2>/dev/null || true
+    replace_content_race_worker_pid=""
+    fail "replacement did not reach the staged-content verification pause"
+}
+replace_content_race_ruby_stopped=true
+target_first_byte="$(/usr/bin/od -An -tx1 -N1 "$pre_swap_staged_content_target_path" | /usr/bin/tr -d '[:space:]')" || fail "could not inspect paused staged-content target"
+[[ "$target_first_byte" == "6f" ]] || fail "replacement advanced beyond the first swap before staged content could be changed"
+pre_swap_staged_content_stage_path="$(/usr/bin/find "$pre_swap_staged_content_root" -maxdepth 1 -name '.one-key-hidpi-stage-*' -print -quit)" || fail "could not inspect paused staged-content path"
+[[ -n "$pre_swap_staged_content_stage_path" ]] || fail "could not observe a staged replacement after its initial hash"
+assert_file_hash "$pre_swap_staged_content_stage_path" "$pre_swap_staged_content_candidate_hash"
+pre_swap_staged_content_stage_identity="$(file_identity "$pre_swap_staged_content_stage_path")"
+printf 'competing staged candidate\n' > "$pre_swap_staged_content_stage_path" || fail "could not mutate staged contents during the pre-swap race"
+[[ "$(file_identity "$pre_swap_staged_content_stage_path")" == "$pre_swap_staged_content_stage_identity" ]] || fail "pre-swap staged mutation must retain the staged inode"
+/bin/kill -CONT "$replace_content_race_ruby_pid" || fail "could not resume replacement after the staged-content race"
+replace_content_race_ruby_stopped=false
+if wait "$replace_content_race_worker_pid"; then
+    replace_content_race_worker_pid=""
+    fail "replacement must reject a staged candidate changed in place before the first swap"
+fi
+replace_content_race_worker_pid=""
+pre_swap_staged_content_output="$(/bin/cat "$pre_swap_staged_content_worker_output")"
+assert_contains "$pre_swap_staged_content_output" "replacement did not start and staged recovery artifact was retained"
+assert_file_hash "$pre_swap_staged_content_target_path" "$pre_swap_staged_content_target_hash"
+assert_file_hash "$pre_swap_staged_content_candidate_path" "$pre_swap_staged_content_candidate_hash"
+assert_file_contents "$pre_swap_staged_content_stage_path" "competing staged candidate"
+[[ "$(file_identity "$pre_swap_staged_content_stage_path")" == "$pre_swap_staged_content_stage_identity" ]] || fail "in-place staged mutation must retain the staged inode"
+
 swap_directory_root="$scratch_dir/swap-directory"
 swap_directory_candidate_path="$swap_directory_root/candidate"
 swap_directory_target_path="$swap_directory_root/target"
@@ -824,6 +988,7 @@ swap_directory_target_path="$swap_directory_root/target"
 /bin/mkdir -p "$swap_directory_root" || fail "could not create staged swap-race directory"
 /bin/dd if=/dev/zero of="$swap_directory_candidate_path" bs=1048576 count=64 >/dev/null 2>&1 || fail "could not create staged swap-race candidate"
 printf 'original target\n' > "$swap_directory_target_path"
+swap_directory_candidate_hash="$(sha256_file "$swap_directory_candidate_path")"
 swap_directory_output=""
 if ! swap_directory_output="$(/bin/bash -c '
     source "$1"
@@ -863,8 +1028,9 @@ if ! swap_directory_output="$(/bin/bash -c '
     fail "replacement must retain the candidate target when the staged path changes after swap"
 fi
 assert_contains "$swap_directory_output" "replacement verification failed after swap; retained target and staged path for manual inspection"
-assert_file_hash "$swap_directory_target_path" "$(sha256_file "$swap_directory_candidate_path")"
+assert_file_hash "$swap_directory_target_path" "$swap_directory_candidate_hash"
 assert_file_exists "$swap_directory_candidate_path"
+assert_file_hash "$swap_directory_candidate_path" "$swap_directory_candidate_hash"
 swap_directory_stage_path="$(/usr/bin/find "$(/usr/bin/dirname "$swap_directory_target_path")" -maxdepth 1 -name '.one-key-hidpi-stage-*' -print -quit)" || fail "could not inspect staged race directory"
 [[ -n "$swap_directory_stage_path" ]] || fail "replacement must retain the competing staged path"
 assert_directory_exists "$swap_directory_stage_path"
