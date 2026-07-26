@@ -163,7 +163,7 @@ assert_file_mode "$target_path" 600
 assert_plist_value "${overrides_root}/DisplayVendorID-30ae/DisplayProductID-7777" custom-metadata sibling-must-survive
 assert_file_absent "$manifest_path"
 assert_file_absent "$original_path"
-assert_directory_absent "${overrides_root}/.one-key-hidpi-locks"
+assert_directory_empty "${overrides_root}/.one-key-hidpi-locks"
 
 if "${repo_dir}/intel-hidpi.sh" apply \
     --vendor-id 30ae \
@@ -178,7 +178,7 @@ fi
 /usr/bin/cmp -s "${scratch_dir}/original-existing.plist" "$target_path" || fail "failed apply must not change the existing override"
 assert_file_absent "$manifest_path"
 assert_file_absent "$original_path"
-assert_directory_absent "${state_root}/DisplayVendorID-30ae"
+assert_directory_empty "${state_root}/DisplayVendorID-30ae/DisplayProductID-62a5"
 
 "${repo_dir}/intel-hidpi.sh" apply \
     --vendor-id 30ae \
@@ -283,7 +283,7 @@ assert_file_exists "$missing_created_target_path"
     --confirm || fail "revert must clean state when a created target was removed"
 assert_file_absent "$missing_created_target_path"
 assert_file_absent "$missing_created_manifest_path"
-assert_directory_absent "${missing_created_state_root}/DisplayVendorID-c"
+assert_directory_empty "${missing_created_state_root}/DisplayVendorID-c/DisplayProductID-d"
 
 backup_identity_overrides_root="${scratch_dir}/backup-identity-overrides"
 backup_identity_state_root="${scratch_dir}/backup-identity-state"
@@ -492,7 +492,7 @@ fi
 assert_contains "$wrong_root_output" "manifest override root does not match this target"
 assert_file_exists "$wrong_target_path"
 assert_file_exists "$bound_manifest_path"
-assert_directory_absent "${wrong_overrides_root}/.one-key-hidpi-locks"
+assert_directory_empty "${wrong_overrides_root}/.one-key-hidpi-locks"
 "${repo_dir}/intel-hidpi.sh" revert \
     --vendor-id 7 \
     --product-id 8 \
@@ -526,7 +526,7 @@ fi
 assert_contains "$legacy_state_output" "manifest version is unsupported"
 assert_file_exists "$legacy_state_target_path"
 assert_file_exists "$legacy_state_manifest_path"
-assert_directory_absent "${legacy_state_overrides_root}/.one-key-hidpi-locks"
+assert_directory_empty "${legacy_state_overrides_root}/.one-key-hidpi-locks"
 
 "${repo_dir}/intel-hidpi.sh" apply \
     --vendor-id 4c2d \
@@ -618,7 +618,7 @@ fi
 assert_contains "$revert_state_link_output" "state files traverse a symbolic link"
 assert_file_exists "$revert_state_link_target_path"
 /usr/bin/cmp -s "$revert_state_link_outside_path" "$revert_state_link_manifest_path" || fail "revert must not change an external manifest link target"
-assert_directory_absent "${revert_state_link_overrides_root}/.one-key-hidpi-locks"
+assert_directory_empty "${revert_state_link_overrides_root}/.one-key-hidpi-locks"
 
 post_lock_target_overrides_root="${scratch_dir}/post-lock-target-overrides"
 post_lock_target_state_root="${scratch_dir}/post-lock-target-state"
@@ -675,6 +675,7 @@ fi
 
 failed_target_vendor_dir="${overrides_root}/DisplayVendorID-1"
 failed_target_state_vendor_dir="${state_root}/DisplayVendorID-1"
+failed_target_state_dir="${failed_target_state_vendor_dir}/DisplayProductID-1"
 if "${repo_dir}/intel-hidpi.sh" apply \
     --vendor-id 1 \
     --product-id 1 \
@@ -684,8 +685,8 @@ if "${repo_dir}/intel-hidpi.sh" apply \
     --confirm >/dev/null 2>&1; then
     fail "invalid apply to a new target must fail explicitly"
 fi
-assert_directory_absent "$failed_target_vendor_dir"
-assert_directory_absent "$failed_target_state_vendor_dir"
+assert_directory_empty "$failed_target_vendor_dir"
+assert_directory_empty "$failed_target_state_dir"
 
 overflow_resolution="18446744073709555456x18446744073709553776"
 if "${repo_dir}/intel-hidpi.sh" apply \
@@ -697,8 +698,9 @@ if "${repo_dir}/intel-hidpi.sh" apply \
     --confirm >/dev/null 2>&1; then
     fail "overflowing apply resolution must fail explicitly"
 fi
-assert_directory_absent "${overrides_root}/DisplayVendorID-1"
-assert_directory_absent "${state_root}/DisplayVendorID-1"
+assert_directory_empty "${overrides_root}/DisplayVendorID-1"
+assert_directory_empty "${state_root}/DisplayVendorID-1/DisplayProductID-1"
+assert_directory_absent "${state_root}/DisplayVendorID-1/DisplayProductID-2"
 
 /bin/ln -s "$outside_dir" "${overrides_root}/DisplayVendorID-dead"
 if "${repo_dir}/intel-hidpi.sh" apply \

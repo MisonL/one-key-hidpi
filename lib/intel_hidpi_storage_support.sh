@@ -7,11 +7,6 @@ OPERATION_TEMPORARY_DIRECTORY_IDENTITY=""
 OPERATION_LOCK_PATH=""
 OPERATION_LOCK_HASH=""
 OPERATION_LOCK_IDENTITY=""
-OPERATION_LOCK_DIRECTORY=""
-OPERATION_LOCK_DIRECTORY_IDENTITY=""
-OPERATION_LOCK_DIRECTORY_CREATED=false
-CREATED_DIRECTORIES=("")
-CREATED_DIRECTORY_IDENTITIES=("")
 PLIST_OPERATION_HASH=""
 PLIST_OPERATION_IDENTITY=""
 
@@ -43,76 +38,7 @@ cleanup_temporary_files() {
     return "$cleanup_status"
 }
 
-cleanup_created_directories() {
-    local index
-    local directory
-    local directory_identity
-    local cleanup_status=0
-
-    for ((index = ${#CREATED_DIRECTORIES[@]} - 1; index >= 0; index--)); do
-        directory="${CREATED_DIRECTORIES[$index]}"
-        directory_identity="${CREATED_DIRECTORY_IDENTITIES[$index]:-}"
-        [[ -n "$directory" ]] || continue
-        if ! valid_file_identity "$directory_identity" ||
-            ! darwin_remove_empty_directory_if_unchanged "$directory" "$directory_identity" >/dev/null 2>&1; then
-            printf 'error: created directory was not removed: %s\n' "$directory" >&2
-            cleanup_status=1
-        fi
-    done
-    return "$cleanup_status"
-}
-
-forget_created_directories_within() {
-    local root_path="$1"
-    local directory
-    local normalized_directory
-    local index
-
-    root_path="$(normalize_darwin_system_alias "$root_path")" || return 1
-    [[ -n "$root_path" && "$root_path" == /* && "$root_path" != *$'\n'* && "$root_path" != *$'\r'* ]] || return 1
-    if [[ "$root_path" != "/" ]]; then
-        root_path="${root_path%/}"
-    fi
-    for ((index = 0; index < ${#CREATED_DIRECTORIES[@]}; index++)); do
-        directory="${CREATED_DIRECTORIES[$index]}"
-        normalized_directory="$(normalize_darwin_system_alias "$directory")" || return 1
-        if [[ "$root_path" == "/" ]]; then
-            [[ "$normalized_directory" == /* ]] || continue
-        else
-            [[ "$normalized_directory" == "$root_path" || "$normalized_directory" == "$root_path/"* ]] || continue
-        fi
-        CREATED_DIRECTORIES[index]=""
-        CREATED_DIRECTORY_IDENTITIES[index]=""
-    done
-    return 0
-}
-
-forget_created_directories_ancestors_of() {
-    local root_path="$1"
-    local directory
-    local normalized_directory
-    local index
-
-    root_path="$(normalize_darwin_system_alias "$root_path")" || return 1
-    [[ -n "$root_path" && "$root_path" == /* && "$root_path" != *$'\n'* && "$root_path" != *$'\r'* ]] || return 1
-    if [[ "$root_path" != "/" ]]; then
-        root_path="${root_path%/}"
-    fi
-    for ((index = 0; index < ${#CREATED_DIRECTORIES[@]}; index++)); do
-        directory="${CREATED_DIRECTORIES[$index]}"
-        [[ -n "$directory" ]] || continue
-        normalized_directory="$(normalize_darwin_system_alias "$directory")" || return 1
-        if [[ "$root_path" == "$normalized_directory" || "$root_path" == "$normalized_directory/"* ]]; then
-            CREATED_DIRECTORIES[index]=""
-            CREATED_DIRECTORY_IDENTITIES[index]=""
-        fi
-    done
-    return 0
-}
-
 release_display_lock() {
-    local cleanup_status=0
-
     [[ -n "$OPERATION_LOCK_PATH" ]] || return 0
     valid_sha256 "$OPERATION_LOCK_HASH" || return 1
     valid_file_identity "$OPERATION_LOCK_IDENTITY" || return 1
@@ -120,16 +46,6 @@ release_display_lock() {
     OPERATION_LOCK_PATH=""
     OPERATION_LOCK_HASH=""
     OPERATION_LOCK_IDENTITY=""
-    if [[ -n "$OPERATION_LOCK_DIRECTORY" ]]; then
-        if [[ "$OPERATION_LOCK_DIRECTORY_CREATED" == true ]]; then
-            valid_file_identity "$OPERATION_LOCK_DIRECTORY_IDENTITY" &&
-                darwin_remove_empty_directory_if_unchanged "$OPERATION_LOCK_DIRECTORY" "$OPERATION_LOCK_DIRECTORY_IDENTITY" >/dev/null 2>&1 || cleanup_status=1
-        fi
-        OPERATION_LOCK_DIRECTORY=""
-        OPERATION_LOCK_DIRECTORY_IDENTITY=""
-        OPERATION_LOCK_DIRECTORY_CREATED=false
-    fi
-    return "$cleanup_status"
 }
 
 cleanup_runtime_artifacts() {
@@ -140,7 +56,6 @@ cleanup_runtime_artifacts() {
             printf 'error: private operation directory was retained for manual inspection\n' >&2
     fi
     release_display_lock || printf 'error: display operation lock was retained for manual inspection\n' >&2
-    cleanup_created_directories || printf 'error: created directories were retained for manual inspection\n' >&2
 }
 
 trap cleanup_runtime_artifacts EXIT
@@ -230,33 +145,9 @@ normalize_storage_root() {
 
 ensure_directory_path_without_symlinks() {
     local path="$1"
-    local created_directories
-    local directory
-    local directory_identity
-    local ensure_status
-    local parse_status=0
 
     [[ "$path" == /* ]] || return 1
-    created_directories="$(darwin_ensure_directory_path "$path")"
-    ensure_status=$?
-
-    if [[ -n "$created_directories" ]]; then
-        while IFS= read -r directory; do
-            if ! IFS= read -r directory_identity; then
-                parse_status=1
-                break
-            fi
-            if [[ -z "$directory" ]] || ! valid_file_identity "$directory_identity"; then
-                parse_status=1
-                continue
-            fi
-            CREATED_DIRECTORIES+=("$directory")
-            CREATED_DIRECTORY_IDENTITIES+=("$directory_identity")
-        done <<< "$created_directories"
-    fi
-
-    ((parse_status == 0)) || return 1
-    return "$ensure_status"
+    darwin_ensure_directory_path "$path"
 }
 
 acquire_display_lock() {
@@ -264,27 +155,11 @@ acquire_display_lock() {
     local vendor_id="$2"
     local product_id="$3"
     local locks_directory
-    local normalized_locks_directory
     local lock_path
-    local created_directory
-    local created_directory_identity
-    local created_index
 
     locks_directory="${overrides_root}/.one-key-hidpi-locks"
-    normalized_locks_directory="$(normalize_darwin_system_alias "$locks_directory")" || return 1
     ensure_directory_path_without_symlinks "$locks_directory" || return 1
     lock_path="$(target_lock_path "$overrides_root" "$vendor_id" "$product_id")" || return 1
-    OPERATION_LOCK_DIRECTORY_CREATED=false
-    for ((created_index = 0; created_index < ${#CREATED_DIRECTORIES[@]}; created_index++)); do
-        created_directory="${CREATED_DIRECTORIES[$created_index]}"
-        created_directory="$(normalize_darwin_system_alias "$created_directory")" || return 1
-        [[ "$created_directory" == "$normalized_locks_directory" ]] || continue
-        created_directory_identity="${CREATED_DIRECTORY_IDENTITIES[$created_index]:-}"
-        valid_file_identity "$created_directory_identity" || return 1
-        OPERATION_LOCK_DIRECTORY_CREATED=true
-        OPERATION_LOCK_DIRECTORY_IDENTITY="$created_directory_identity"
-        break
-    done
     local lock_snapshot
 
     lock_snapshot="$(darwin_acquire_lock "$lock_path" "$$")" || return 1
@@ -292,7 +167,6 @@ acquire_display_lock() {
     OPERATION_LOCK_PATH="$lock_path"
     valid_sha256 "$OPERATION_LOCK_HASH" || return 1
     valid_file_identity "$OPERATION_LOCK_IDENTITY" || return 1
-    OPERATION_LOCK_DIRECTORY="$normalized_locks_directory"
 }
 
 normalize_hex_id() {
@@ -459,11 +333,6 @@ reset_operation_cleanup_state() {
     OPERATION_LOCK_PATH=""
     OPERATION_LOCK_HASH=""
     OPERATION_LOCK_IDENTITY=""
-    OPERATION_LOCK_DIRECTORY=""
-    OPERATION_LOCK_DIRECTORY_IDENTITY=""
-    OPERATION_LOCK_DIRECTORY_CREATED=false
-    CREATED_DIRECTORIES=("")
-    CREATED_DIRECTORY_IDENTITIES=("")
     PLIST_OPERATION_HASH=""
     PLIST_OPERATION_IDENTITY=""
 }
@@ -477,7 +346,6 @@ complete_operation_cleanup() {
         valid_file_identity "$OPERATION_TEMPORARY_DIRECTORY_IDENTITY" &&
             darwin_remove_empty_directory_if_unchanged "$OPERATION_TEMPORARY_DIRECTORY" "$OPERATION_TEMPORARY_DIRECTORY_IDENTITY" || cleanup_status=1
     fi
-    cleanup_created_directories || cleanup_status=1
     ((cleanup_status == 0)) || return "$cleanup_status"
     reset_operation_cleanup_state
     return "$cleanup_status"

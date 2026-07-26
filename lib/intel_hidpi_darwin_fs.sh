@@ -34,7 +34,6 @@ darwin_secure_fs() {
             extern "int mkdirat(int, const char*, int)"
             extern "int unlinkat(int, const char*, int)"
             extern "int renameatx_np(int, const char*, int, const char*, unsigned int)"
-            extern "int fclonefileat(int, int, const char*, unsigned int)"
             extern "int fcopyfile(int, int, void*, unsigned int)"
             extern "int fchmod(int, int)"
             extern "int fchown(int, int, int)"
@@ -50,11 +49,6 @@ darwin_secure_fs() {
             RENAME_EXCL = 0x00000004
             RENAME_NOFOLLOW_ANY = 0x00000010
             COPYFILE_ALL = 0x0000000f
-            CLONE_FALLBACK_ERRNOS = [
-            Errno::EXDEV::Errno,
-            Errno::ENOTSUP::Errno,
-            Errno::EOPNOTSUPP::Errno,
-            ].uniq
 
             class Failure < StandardError
                 def self.raise_failure
@@ -77,7 +71,7 @@ darwin_secure_fs() {
             components
         end
 
-        def open_directory_path(path, create: false, created_paths: nil)
+        def open_directory_path(path, create: false)
             fd = DarwinSecureFs.openat(
                 AT_FDCWD,
                 "/",
@@ -94,11 +88,9 @@ darwin_secure_fs() {
                     Fcntl::O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
                     0,
                 )
-                created = false
                 if next_fd < 0 && create
                     result = DarwinSecureFs.mkdirat(fd, component, 0o755)
                     Failure.raise_failure if result < 0 && Fiddle.last_error != Errno::EEXIST::Errno
-                    created = result == 0
                     next_fd = DarwinSecureFs.openat(
                         fd,
                         component,
@@ -110,7 +102,9 @@ darwin_secure_fs() {
                 DarwinSecureFs.close(fd)
                 fd = next_fd
                 current_path = "#{current_path}/#{component}"
-                created_paths << [current_path, file_identity(fd)] if created && created_paths
+                # mkdirat does not return a descriptor. A later reopen cannot prove
+                # that this name still denotes the directory we created, so do not
+                # register it for destructive cleanup.
             end
             fd
         rescue StandardError
@@ -270,15 +264,17 @@ darwin_secure_fs() {
             false
         end
 
-        def clone_fd_to_directory(source_fd, target_directory_fd, target_name)
-            result = DarwinSecureFs.fclonefileat(source_fd, target_directory_fd, target_name, 0)
-            if result < 0
-                clone_errno = Fiddle.last_error
-                Failure.raise_failure unless CLONE_FALLBACK_ERRNOS.include?(clone_errno)
-                target_fd = create_regular_file(target_directory_fd, target_name, 0o600)
-                IO.for_fd(source_fd, autoclose: false).rewind
-                copy_result = DarwinSecureFs.fcopyfile(source_fd, target_fd, nil, COPYFILE_ALL)
-                if copy_result < 0
+        def copy_fd_to_new_file(source_fd, target_directory_fd, target_name)
+            target_fd = create_regular_file(target_directory_fd, target_name, 0o600)
+            IO.for_fd(source_fd, autoclose: false).rewind
+            copy_result = DarwinSecureFs.fcopyfile(source_fd, target_fd, nil, COPYFILE_ALL)
+            Failure.raise_failure if copy_result < 0
+            IO.for_fd(source_fd, autoclose: false).rewind
+            IO.for_fd(target_fd, autoclose: false).rewind
+            target_fd
+        rescue StandardError
+            if defined?(target_fd) && target_fd && target_fd >= 0
+                begin
                     partial_hash = sha256_fd(target_fd)
                     partial_identity = file_identity(target_fd)
                     removed = remove_verified_named_file(
@@ -287,17 +283,16 @@ darwin_secure_fs() {
                         target_fd,
                         partial_hash,
                         partial_identity,
-                        "partial clone",
+                        "partial copy",
                     )
+                    warn "error: partial copy cleanup failed; retained recovery artifact" unless removed
+                rescue StandardError
+                    warn "error: partial copy cleanup failed; retained recovery artifact"
+                ensure
                     DarwinSecureFs.close(target_fd)
-                    warn "error: partial clone cleanup failed; retained recovery artifact" unless removed
-                    Failure.raise_failure
                 end
-                IO.for_fd(source_fd, autoclose: false).rewind
-                IO.for_fd(target_fd, autoclose: false).rewind
-                return target_fd
             end
-            open_regular_file(target_directory_fd, target_name)
+            Failure.raise_failure
         end
 
         def plist_output(fd, *arguments)
@@ -462,21 +457,6 @@ darwin_secure_fs() {
             false
         end
 
-        def restore_failed_swap(directory_fd, target_name, staged_name, staged_fd)
-            return false unless path_still_names_fd?(directory_fd, target_name, staged_fd)
-
-            result = DarwinSecureFs.renameatx_np(
-                directory_fd,
-                target_name,
-                directory_fd,
-                staged_name,
-                RENAME_SWAP | RENAME_NOFOLLOW_ANY,
-            )
-            return false if result < 0
-
-            path_still_names_fd?(directory_fd, staged_name, staged_fd)
-        end
-
         def remove_stale_lock(directory_fd, lock_name, lock_fd, expected_hash, expected_identity)
             remove_verified_named_file(
                 directory_fd,
@@ -510,21 +490,8 @@ darwin_secure_fs() {
             operation = arguments.shift
         case operation
         when "ensure-directory"
-            created_paths = []
-            begin
-                directory_fd = open_directory_path(arguments.fetch(0), create: true, created_paths: created_paths)
-                created_paths.each do |created_path, created_identity|
-                    puts created_path
-                    puts created_identity
-                end
-                DarwinSecureFs.close(directory_fd)
-            rescue Failure
-                created_paths.each do |created_path, created_identity|
-                    puts created_path
-                    puts created_identity
-                end
-                exit 1
-            end
+            directory_fd = open_directory_path(arguments.fetch(0), create: true)
+            DarwinSecureFs.close(directory_fd)
         when "install"
             source_path, target_path, expected_hash, expected_identity = arguments
             source_directory, source_name = split_file_path(source_path)
@@ -534,7 +501,7 @@ darwin_secure_fs() {
             source_fd = open_regular_file(source_directory_fd, source_name)
             Failure.raise_failure unless expected_sha256?(source_fd, expected_hash)
             Failure.raise_failure unless expected_identity?(source_fd, expected_identity)
-            installed_fd = clone_fd_to_directory(source_fd, target_directory_fd, target_name)
+            installed_fd = copy_fd_to_new_file(source_fd, target_directory_fd, target_name)
             target_fd = open_regular_file(target_directory_fd, target_name)
             installed_matches = same_file?(installed_fd, target_fd) &&
                 expected_sha256?(target_fd, expected_hash) &&
@@ -646,9 +613,35 @@ darwin_secure_fs() {
             Failure.raise_failure unless expected_identity?(target_fd, expected_target_identity)
             Failure.raise_failure unless path_still_names_fd?(target_directory_fd, target_name, target_fd)
             staged_name = ".one-key-hidpi-stage-#{Process.pid}-#{SecureRandom.hex(12)}"
-            staged_fd = clone_fd_to_directory(source_fd, target_directory_fd, staged_name)
+            staged_fd = copy_fd_to_new_file(source_fd, target_directory_fd, staged_name)
             Failure.raise_failure unless expected_sha256?(staged_fd, expected_source_hash)
             staged_identity = file_identity(staged_fd)
+            staged_path_matches = path_still_names_fd?(target_directory_fd, staged_name, staged_fd)
+            target_path_matches = path_still_names_fd?(target_directory_fd, target_name, target_fd)
+            unless staged_path_matches && target_path_matches
+                staged_removed = false
+                if staged_path_matches
+                    staged_removed = remove_verified_named_file(
+                        target_directory_fd,
+                        staged_name,
+                        staged_fd,
+                        expected_source_hash,
+                        staged_identity,
+                        "staged replacement candidate",
+                    )
+                end
+                DarwinSecureFs.close(staged_fd)
+                DarwinSecureFs.close(target_fd)
+                DarwinSecureFs.close(source_fd)
+                DarwinSecureFs.close(target_directory_fd)
+                DarwinSecureFs.close(source_directory_fd)
+                if staged_path_matches && staged_removed
+                    warn "error: replacement did not start because target changed before swap"
+                    exit 1
+                end
+                warn "error: replacement did not start and staged recovery artifact was retained"
+                exit 2
+            end
             result = DarwinSecureFs.renameatx_np(
                 target_directory_fd,
                 staged_name,
@@ -688,18 +681,6 @@ darwin_secure_fs() {
                 expected_identity?(moved_previous_fd, expected_target_identity) &&
                 path_still_names_fd?(target_directory_fd, staged_name, moved_previous_fd)
             unless target_matches && previous_matches
-                recovered = restore_failed_swap(target_directory_fd, target_name, staged_name, staged_fd)
-                staged_removed = false
-                if recovered
-                    staged_removed = remove_verified_named_file(
-                        target_directory_fd,
-                        staged_name,
-                        staged_fd,
-                        expected_source_hash,
-                        staged_identity,
-                        "staged replacement candidate",
-                    )
-                end
                 DarwinSecureFs.close(new_target_fd) if new_target_fd
                 DarwinSecureFs.close(moved_previous_fd) if moved_previous_fd
                 DarwinSecureFs.close(staged_fd)
@@ -707,11 +688,7 @@ darwin_secure_fs() {
                 DarwinSecureFs.close(source_fd)
                 DarwinSecureFs.close(target_directory_fd)
                 DarwinSecureFs.close(source_directory_fd)
-                if recovered && staged_removed
-                    warn "error: target changed during replacement; target was restored and no override was written"
-                    exit 1
-                end
-                warn "error: replacement verification failed after swap; retained target and staged recovery artifact"
+                warn "error: replacement verification failed after swap; retained target and staged path for manual inspection"
                 exit 2
             end
             installed_snapshot = file_snapshot(new_target_fd)

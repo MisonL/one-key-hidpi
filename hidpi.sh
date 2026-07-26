@@ -544,10 +544,89 @@ function legacy_preflight_single_display_cleanup() {
     ' "$overrides_path" "$vendor_name"
 }
 
+function legacy_publish_restore_script() {
+    local source_path="$1"
+    local restore_directory="$2"
+    local restore_name="$3"
+
+    [[ -f "$source_path" && ! -L "$source_path" ]] || return 1
+    [[ -d "$restore_directory" && "$restore_name" == ".hidpi-disable" ]] || return 1
+    # shellcheck disable=SC2016
+    /usr/bin/perl -e '
+        use Errno qw(ENOENT);
+        use Fcntl qw(O_DIRECTORY O_NOFOLLOW O_NONBLOCK O_RDONLY S_IFMT S_IFREG);
+        use File::Basename qw(basename dirname);
+
+        my ($source_path, $restore_directory, $restore_name) = @ARGV;
+        my $sys_openat = 463;
+        my $sys_renameatx_np = 488;
+        my $open_directory_nofollow_any = 0x20100000;
+        my $rename_excl_nofollow = 0x14;
+
+        sub open_directory {
+            my ($path) = @_;
+            return unless defined $path && $path =~ m{\A/} && $path !~ /[\r\n\0]/;
+            $path =~ s{\A/tmp(?=/|$)}{/private/tmp};
+            $path =~ s{\A/var(?=/|$)}{/private/var};
+            sysopen(my $directory, $path, O_RDONLY | O_DIRECTORY | $open_directory_nofollow_any) or return;
+            return $directory;
+        }
+
+        sub same_file {
+            my ($first, $second) = @_;
+            my @first_stat = stat($first);
+            my @second_stat = stat($second);
+            return @first_stat && @second_stat &&
+                $first_stat[0] == $second_stat[0] && $first_stat[1] == $second_stat[1];
+        }
+
+        my $source_parent_path = dirname($source_path);
+        my $source_name = basename($source_path);
+        exit 1 unless $source_name ne q{} && $source_name ne q{.} && $source_name ne q{..};
+        exit 1 unless $restore_name =~ /\A\.hidpi-disable\z/;
+
+        my $source_parent = open_directory($source_parent_path) or exit 1;
+        my $restore_parent = open_directory($restore_directory) or exit 1;
+        my $existing_target_fd = syscall($sys_openat, fileno($restore_parent), $restore_name,
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK, 0);
+        exit 1 if $existing_target_fd >= 0;
+        exit 1 unless $! == ENOENT;
+        my $source_fd = syscall($sys_openat, fileno($source_parent), $source_name,
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK, 0);
+        exit 1 if $source_fd < 0;
+        open(my $source, "<&$source_fd") or exit 1;
+        my @source_stat = stat($source);
+        exit 1 unless @source_stat && ($source_stat[2] & S_IFMT) == S_IFREG && $source_stat[3] == 1;
+
+        my $source_check_fd = syscall($sys_openat, fileno($source_parent), $source_name,
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK, 0);
+        exit 1 if $source_check_fd < 0;
+        open(my $source_check, "<&$source_check_fd") or exit 1;
+        exit 1 unless same_file($source, $source_check);
+        close($source_check) or exit 1;
+
+        my $rename_result = syscall($sys_renameatx_np,
+            fileno($source_parent), $source_name,
+            fileno($restore_parent), $restore_name,
+            $rename_excl_nofollow);
+        exit 1 if $rename_result < 0;
+
+        my $published_fd = syscall($sys_openat, fileno($restore_parent), $restore_name,
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK, 0);
+        exit 1 if $published_fd < 0;
+        open(my $published, "<&$published_fd") or exit 1;
+        my @published_stat = stat($published);
+        exit 1 unless @published_stat && ($published_stat[2] & S_IFMT) == S_IFREG &&
+            $published_stat[3] == 1 && same_file($source, $published);
+    ' "$source_path" "$restore_directory" "$restore_name"
+}
+
 #
 function generate_restore_cmd() {
     local restore_directory
     local restore_script
+    local restore_temporary_directory
+    local restore_temporary
 
     [[ -n "${HOME:-}" && -d "$HOME" && -w "$HOME" ]] || {
         echo "Cannot create the restore script in the home directory." >&2
@@ -558,9 +637,26 @@ function generate_restore_cmd() {
         return 1
     }
     restore_script="${restore_directory}/.hidpi-disable"
+    [[ ! -e "$restore_script" && ! -L "$restore_script" ]] || {
+        echo "Refusing to replace an existing restore script." >&2
+        return 1
+    }
+    restore_temporary_directory="$(umask 077; /usr/bin/mktemp -d "${restore_directory}/.one-key-hidpi-restore.XXXXXX")" || {
+        echo "Cannot create the restore script in the home directory." >&2
+        return 1
+    }
+    restore_temporary="$(umask 077; /usr/bin/mktemp "${restore_temporary_directory}/restore.XXXXXX")" || {
+        /bin/rmdir "$restore_temporary_directory" 2>/dev/null || true
+        echo "Cannot create the restore script in the home directory." >&2
+        return 1
+    }
+    cleanup_restore_temporary() {
+        /bin/rm -f "$restore_temporary"
+        /bin/rmdir "$restore_temporary_directory" 2>/dev/null || true
+    }
 
     if [[ $is_applesilicon == true ]]; then
-        cat >"$restore_script" <<-\CCC || return 1
+        if ! cat >"$restore_temporary" <<-\CCC; then
 #!/bin/bash
 function get_vidpid_applesilicon() {
     local index=0
@@ -647,8 +743,11 @@ function get_vidpid_applesilicon() {
 get_vidpid_applesilicon
 
 CCC
+            cleanup_restore_temporary
+            return 1
+        fi
     else
-        cat >"$restore_script" <<-\CCC || return 1
+        if ! cat >"$restore_temporary" <<-\CCC; then
 #!/bin/bash
 function get_edid() {
     local index=0
@@ -693,6 +792,9 @@ function get_edid() {
 get_edid
 
 CCC
+            cleanup_restore_temporary
+            return 1
+        fi
     fi
 
     {
@@ -700,9 +802,12 @@ CCC
         declare -f legacy_remove_icon_product_entry
         declare -f legacy_remove_vendor_entries
         declare -f legacy_preflight_single_display_cleanup
-    } >>"$restore_script" || return 1
+    } >>"$restore_temporary" || {
+        cleanup_restore_temporary
+        return 1
+    }
 
-    cat >>"$restore_script" <<-'CCC' || return 1
+    if ! cat >>"$restore_temporary" <<-'CCC'
 # Check if monitor was found
 if [[ -z $VendorID || -z $ProductID || $VendorID == 0 || $ProductID == 0 ]]; then
     echo "No monitors found. Exiting..."
@@ -753,7 +858,30 @@ esac
 echo "HIDPI Disabled"
 CCC
 
-    chmod +x "$restore_script" || return 1
+    then
+        cleanup_restore_temporary
+        return 1
+    fi
+
+    chmod 700 "$restore_temporary" || {
+        cleanup_restore_temporary
+        return 1
+    }
+    [[ ! -e "$restore_script" && ! -L "$restore_script" ]] || {
+        cleanup_restore_temporary
+        echo "Refusing to replace an existing restore script." >&2
+        return 1
+    }
+    legacy_publish_restore_script "$restore_temporary" "$restore_directory" ".hidpi-disable" || {
+        cleanup_restore_temporary
+        echo "Cannot safely publish the restore script." >&2
+        return 1
+    }
+    [[ -f "$restore_script" && ! -L "$restore_script" && -x "$restore_script" ]] || {
+        cleanup_restore_temporary
+        return 1
+    }
+    cleanup_restore_temporary
 
 }
 

@@ -251,10 +251,6 @@ apply_override() {
     manifest_candidate_identity="$PLIST_OPERATION_IDENTITY"
     record_temporary_file_snapshot "$manifest_candidate_path" "$manifest_candidate_hash" "$manifest_candidate_identity" || fail "could not verify manifest candidate"
     commit_apply_state "$target_path" "$candidate_path" "$target_existed" "$original_hash" "$backup_candidate_path" "$original_path" "$manifest_candidate_path" "$manifest_path" "$candidate_hash" "$manifest_candidate_hash" "$original_identity" "$candidate_identity" "$manifest_candidate_identity" || fail "apply did not complete; recovery state was retained for manual inspection"
-    forget_created_directories_within "$overrides_root"
-    forget_created_directories_within "$state_root"
-    forget_created_directories_ancestors_of "$overrides_root"
-    forget_created_directories_ancestors_of "$state_root"
     complete_operation_cleanup || fail "apply committed but temporary artifact or operation lock cleanup failed"
 
     printf 'applied=%s\n' "$target_relative"
@@ -269,9 +265,6 @@ revert_override() {
     local confirmed="$5"
     local target_path
     local state_dir
-    local state_dir_identity
-    local state_parent_dir
-    local state_parent_identity
     local manifest_path
     local original_path
     local target_dir
@@ -325,13 +318,7 @@ revert_override() {
         path_has_disallowed_symbolic_link "$original_path"; then
         fail "target or state files traverse a symbolic link"
     fi
-    ensure_directory_path_without_symlinks "$target_dir" || fail "could not prepare target directory safely"
-    ensure_directory_path_without_symlinks "$state_dir" || fail "could not prepare state directory safely"
-    state_dir_identity="$(darwin_directory_identity "$state_dir")" || fail "could not identify state directory safely"
-    valid_file_identity "$state_dir_identity" || fail "could not identify state directory safely"
-    state_parent_dir="$(/usr/bin/dirname "$state_dir")"
-    state_parent_identity="$(darwin_directory_identity "$state_parent_dir")" || fail "could not identify state parent directory safely"
-    valid_file_identity "$state_parent_identity" || fail "could not identify state parent directory safely"
+    darwin_directory_identity "$state_dir" >/dev/null || fail "could not open state directory safely"
     [[ -f "$manifest_path" ]] || fail "no manifest exists for this target"
     if manifest_metadata="$(read_revert_manifest "$manifest_path" "$vendor_id" "$product_id" "$target_relative" "$overrides_root")"; then
         :
@@ -434,19 +421,12 @@ revert_override() {
         file_matches_snapshot "$target_path" "$original_hash" "$restored_target_identity" || fail "restored target changed before state cleanup; retaining state"
         file_matches_snapshot "$original_path" "$original_hash" "$original_identity" || fail "original backup changed before cleanup; retaining state"
         remove_file_if_unchanged "$original_path" "$original_hash" "$original_identity" || fail "override was restored but original backup could not be removed"
-        forget_created_directories_within "$overrides_root"
     fi
     if [[ "$target_existed" == false ]]; then
         [[ ! -e "$target_path" && ! -L "$target_path" ]] || fail "created target appeared before state cleanup; retaining state"
     fi
     file_matches_snapshot "$manifest_path" "$manifest_hash" "$manifest_identity" || fail "manifest changed before state cleanup; retaining state"
     remove_file_if_unchanged "$manifest_path" "$manifest_hash" "$manifest_identity" || fail "override was reverted but manifest could not be removed"
-    if ! darwin_remove_empty_directory_if_unchanged "$state_dir" "$state_dir_identity"; then
-        printf 'warning: state directory was retained because it changed or is not empty: %s\n' "$state_dir" >&2
-    fi
-    if ! darwin_remove_empty_directory_if_unchanged "$state_parent_dir" "$state_parent_identity"; then
-        printf 'warning: state parent directory was retained because it changed or is not empty: %s\n' "$state_parent_dir" >&2
-    fi
     complete_operation_cleanup || fail "revert committed but temporary artifact or operation lock cleanup failed"
 
     printf 'reverted=%s\n' "$target_relative"

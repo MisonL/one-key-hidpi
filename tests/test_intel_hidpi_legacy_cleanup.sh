@@ -77,6 +77,24 @@ assert_executable_file() {
     [[ -f "$1" && -x "$1" ]] || fail "expected executable file: $1"
 }
 
+assert_file_mode() {
+    local path="$1"
+    local expected_mode="$2"
+    local actual_mode
+
+    actual_mode="$(/usr/bin/stat -f '%Lp' "$path")" || fail "could not inspect ${path} mode"
+    [[ "$actual_mode" == "$expected_mode" ]] || fail "expected ${path} mode ${expected_mode}, got ${actual_mode}"
+}
+
+assert_file_link_count() {
+    local path="$1"
+    local expected_count="$2"
+    local actual_count
+
+    actual_count="$(/usr/bin/stat -f '%l' "$path")" || fail "could not inspect ${path} link count"
+    [[ "$actual_count" == "$expected_count" ]] || fail "expected ${path} link count ${expected_count}, got ${actual_count}"
+}
+
 create_icons_plist_fixture() {
     local path="$1"
 
@@ -139,8 +157,14 @@ first_edid="$(/usr/bin/sed -n 's/.*"IODisplayEDID" = <\([0-9A-Fa-f][0-9A-Fa-f]*\
 [[ -n "$first_edid" ]] || fail "could not load an EDID fixture"
 
 scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-legacy-cleanup.XXXXXX")" || fail "could not create scratch directory"
+restore_cross_volume_home=""
 
 cleanup() {
+    case "$restore_cross_volume_home" in
+    "${repo_dir}"/.one-key-hidpi-restore-cross-volume.*)
+        /bin/rm -rf "$restore_cross_volume_home"
+        ;;
+    esac
     /bin/rm -rf "$scratch_dir"
 }
 trap cleanup EXIT
@@ -404,6 +428,8 @@ restore_home="${scratch_dir}/restore"
 generate_restore_script "$restore_home" || fail "legacy restore-script generation should succeed"
 restore_script="${restore_home}/.hidpi-disable"
 assert_executable_file "$restore_script"
+assert_file_mode "$restore_script" "700"
+assert_file_link_count "$restore_script" "1"
 restore_contents="$(/bin/cat "$restore_script")" || fail "could not read restore script"
 assert_contains "$restore_contents" "#!/bin/bash"
 assert_contains "$restore_contents" "legacy_remove_icon_product_entry ()"
@@ -412,6 +438,73 @@ assert_contains "$restore_contents" "O_NOFOLLOW"
 assert_contains "$restore_contents" "\"/dev/fd/\$icons_fd\""
 assert_contains "$restore_contents" "plutil\", \"-lint\""
 assert_not_contains "$restore_contents" "\$(declare -f"
+
+restore_cross_volume_home="$(/usr/bin/mktemp -d "${repo_dir}/.one-key-hidpi-restore-cross-volume.XXXXXX")" || fail "could not create cross-volume restore home"
+restore_cross_volume_home_device="$(/usr/bin/stat -f '%d' "$restore_cross_volume_home")" || fail "could not inspect cross-volume restore home"
+generate_restore_script "$restore_cross_volume_home" || fail "restore-script generation must publish from a home-volume staging directory"
+assert_executable_file "${restore_cross_volume_home}/.hidpi-disable"
+[[ "$(/usr/bin/stat -f '%d' "${restore_cross_volume_home}/.hidpi-disable")" == "$restore_cross_volume_home_device" ]] || fail "restore script must be published on the home filesystem"
+restore_cross_volume_staging="$(/usr/bin/find "$restore_cross_volume_home" -maxdepth 1 -name '.one-key-hidpi-restore.*' -print -quit)" || fail "could not inspect cross-volume restore staging"
+[[ -z "$restore_cross_volume_staging" ]] || fail "restore-script publication must clean home-volume staging"
+
+restore_existing_home="${scratch_dir}/restore-existing"
+restore_existing_script="${restore_existing_home}/.hidpi-disable"
+restore_existing_alias="${restore_existing_home}/existing-alias"
+/bin/mkdir -p "$restore_existing_home" || fail "could not create existing restore fixture"
+printf 'existing restore script\n' > "$restore_existing_script"
+generate_restore_existing_output=""
+if generate_restore_existing_output="$(generate_restore_script "$restore_existing_home" 2>&1)"; then
+    fail "restore-script generation must reject an existing regular file"
+fi
+assert_contains "$generate_restore_existing_output" "Refusing to replace an existing restore script."
+assert_file_contents "$restore_existing_script" "existing restore script"
+assert_file_mode "$restore_existing_script" "644"
+
+/bin/ln "$restore_existing_script" "$restore_existing_alias" || fail "could not create existing restore hard link"
+restore_existing_hardlink_output=""
+if restore_existing_hardlink_output="$(generate_restore_script "$restore_existing_home" 2>&1)"; then
+    fail "restore-script generation must reject an existing hard link"
+fi
+assert_contains "$restore_existing_hardlink_output" "Refusing to replace an existing restore script."
+assert_file_contents "$restore_existing_script" "existing restore script"
+assert_file_contents "$restore_existing_alias" "existing restore script"
+assert_file_mode "$restore_existing_script" "644"
+assert_file_link_count "$restore_existing_script" "2"
+
+restore_link_home="${scratch_dir}/restore-link"
+restore_link_script="${restore_link_home}/.hidpi-disable"
+restore_link_outside="${restore_link_home}/outside"
+/bin/mkdir -p "$restore_link_home" || fail "could not create linked restore fixture"
+printf 'outside restore script\n' > "$restore_link_outside"
+/bin/ln -s "$restore_link_outside" "$restore_link_script" || fail "could not create restore-script link"
+restore_link_mode="$(/usr/bin/stat -f '%Lp' "$restore_link_outside")" || fail "could not inspect linked restore target"
+restore_link_output=""
+if restore_link_output="$(generate_restore_script "$restore_link_home" 2>&1)"; then
+    fail "restore-script generation must reject a symbolic link"
+fi
+assert_contains "$restore_link_output" "Refusing to replace an existing restore script."
+assert_file_contents "$restore_link_outside" "outside restore script"
+assert_file_mode "$restore_link_outside" "$restore_link_mode"
+[[ -L "$restore_link_script" ]] || fail "restore-script link must remain in place"
+
+restore_chmod_failure_home="${scratch_dir}/restore-chmod-failure"
+restore_chmod_failure_before="${scratch_dir}/restore-chmod-failure-before"
+restore_chmod_failure_after="${scratch_dir}/restore-chmod-failure-after"
+/bin/mkdir -p "$restore_chmod_failure_home" || fail "could not create chmod-failure restore home"
+/usr/bin/find "$restore_chmod_failure_home" -maxdepth 1 -type d -name '.one-key-hidpi-restore.*' -print | LC_ALL=C /usr/bin/sort > "$restore_chmod_failure_before" || fail "could not inventory restore staging directories"
+if HOME="$restore_chmod_failure_home" /bin/bash -c '
+    source "$1" >/dev/null
+    is_applesilicon=false
+    chmod() {
+        return 1
+    }
+    generate_restore_cmd
+' bash "$repo_dir/hidpi.sh" >/dev/null 2>&1; then
+    fail "restore-script generation must fail when staging permissions cannot be set"
+fi
+assert_file_absent "${restore_chmod_failure_home}/.hidpi-disable"
+/usr/bin/find "$restore_chmod_failure_home" -maxdepth 1 -type d -name '.one-key-hidpi-restore.*' -print | LC_ALL=C /usr/bin/sort > "$restore_chmod_failure_after" || fail "could not re-inventory restore staging directories"
+/usr/bin/diff -u "$restore_chmod_failure_before" "$restore_chmod_failure_after" >/dev/null || fail "restore-script generation must clean home-volume staging after chmod failure"
 
 missing_restore_home="${scratch_dir}/missing-restore-home"
 missing_restore_home_output=""

@@ -6,6 +6,7 @@ set -o pipefail
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 readonly REMOVE_RACE_FIXTURE_SIZE=256m
 readonly REMOVE_RACE_WAIT_SECONDS=10
+readonly INSTALL_IDENTITY_RACE_WAIT_SECONDS=60
 readonly LSOF_WAIT_SECONDS=2
 
 fail() {
@@ -57,23 +58,90 @@ assert_directory_exists() {
     [[ -d "$1" && ! -L "$1" ]] || fail "expected directory: $1"
 }
 
+assert_replace_uses_single_swap() {
+    local replace_swap_count
+
+    replace_swap_count="$(/usr/bin/awk '
+        /^[[:space:]]*when "replace"/ { in_replace = 1; next }
+        in_replace && /^[[:space:]]*when "remove"/ { exit }
+        in_replace && /RENAME_SWAP/ { count++ }
+        END { print count + 0 }
+    ' "${repo_dir}/lib/intel_hidpi_darwin_fs.sh")" || fail "could not inspect replacement swap count"
+    [[ "$replace_swap_count" == "1" ]] || fail "replacement must not issue a second swap after verification failure"
+    if /usr/bin/grep -Fq 'restore_failed_swap' "${repo_dir}/lib/intel_hidpi_darwin_fs.sh" ||
+        /usr/bin/grep -Fq 'restore_pre_swap_stage_replacement' "${repo_dir}/lib/intel_hidpi_darwin_fs.sh"; then
+        fail "replacement must not reintroduce automatic swap recovery"
+    fi
+}
+
+assert_copy_uses_descriptor_bound_new_file() {
+    local copy_function
+
+    /usr/bin/grep -Fq 'def copy_fd_to_new_file' "${repo_dir}/lib/intel_hidpi_darwin_fs.sh" ||
+        fail "new-file installation must use a descriptor-bound copy helper"
+    /usr/bin/grep -Fq 'target_fd = create_regular_file(target_directory_fd, target_name, 0o600)' "${repo_dir}/lib/intel_hidpi_darwin_fs.sh" ||
+        fail "new-file installation must create the destination with O_EXCL before copying"
+    copy_function="$(/usr/bin/awk '
+        /def copy_fd_to_new_file/ { in_copy = 1 }
+        in_copy { print }
+        in_copy && /^        end$/ { exit }
+    ' "${repo_dir}/lib/intel_hidpi_darwin_fs.sh")" || fail "could not inspect descriptor-bound copy helper"
+    printf '%s\n' "$copy_function" | /usr/bin/grep -Fq 'DarwinSecureFs.fcopyfile(source_fd, target_fd, nil, COPYFILE_ALL)' ||
+        fail "new-file installation must copy between the already-open descriptors"
+    if /usr/bin/grep -Fq 'fclonefileat' "${repo_dir}/lib/intel_hidpi_darwin_fs.sh"; then
+        fail "new-file installation must not reopen an fclonefileat destination by name"
+    fi
+}
+
 find_ruby_holding_path() {
     local worker_pid="$1"
     local path="$2"
+    local wait_seconds="${3:-$REMOVE_RACE_WAIT_SECONDS}"
     local observed_path
     local ruby_pid
-    local deadline=$((SECONDS + REMOVE_RACE_WAIT_SECONDS))
+    local deadline
 
-    observed_path="$(/bin/realpath "$path")" || return 1
+    [[ "$wait_seconds" =~ ^[1-9][0-9]*$ ]] || return 1
+    deadline=$((SECONDS + wait_seconds))
+
     while ((SECONDS < deadline)); do
+        [[ -e "$path" && ! -L "$path" ]] || {
+            /bin/sleep 0.05
+            continue
+        }
+        observed_path="$(/bin/realpath "$path")" || {
+            /bin/sleep 0.05
+            continue
+        }
         while IFS= read -r ruby_pid; do
             [[ "$ruby_pid" =~ ^[0-9]+$ ]] || continue
             if lsof_reports_open_path "$ruby_pid" "$observed_path"; then
                 printf '%s\n' "$ruby_pid"
                 return 0
             fi
-        done < <(/bin/ps -axo pid=,ppid=,comm=,args= | LC_ALL=C /usr/bin/awk -v worker_pid="$worker_pid" -v path="$path" '
-            ($1 == worker_pid || $2 == worker_pid) && $3 ~ /ruby/ && index($0, path) > 0 { print $1 }
+        done < <(/bin/ps -axo pid=,ppid=,comm= | LC_ALL=C /usr/bin/awk -v worker_pid="$worker_pid" '
+            {
+                parent[$1] = $2
+                command[$1] = $3
+            }
+            END {
+                descendant[worker_pid] = 1
+                changed = 1
+                while (changed) {
+                    changed = 0
+                    for (pid in parent) {
+                        if (descendant[parent[pid]] && !descendant[pid]) {
+                            descendant[pid] = 1
+                            changed = 1
+                        }
+                    }
+                }
+                for (pid in descendant) {
+                    if (pid != worker_pid && command[pid] ~ /ruby/) {
+                        print pid
+                    }
+                }
+            }
         ')
         /bin/sleep 0.05
     done
@@ -130,12 +198,25 @@ create_pending_manifest() {
 }
 
 scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-races.XXXXXX")" || fail "could not create scratch directory"
+install_race_worker_pid=""
+install_race_ruby_pid=""
+install_race_ruby_stopped=false
 remove_race_ruby_pid=""
 remove_race_ruby_stopped=false
 remove_race_worker_pid=""
 alias_lock_real_root=""
 
 cleanup() {
+    if [[ "$install_race_ruby_stopped" == true && -n "$install_race_ruby_pid" ]]; then
+        /bin/kill -CONT "$install_race_ruby_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$install_race_worker_pid" ]] && /bin/kill -0 "$install_race_worker_pid" 2>/dev/null; then
+        /bin/kill -TERM "$install_race_worker_pid" 2>/dev/null || true
+        if [[ -n "$install_race_ruby_pid" ]] && /bin/kill -0 "$install_race_ruby_pid" 2>/dev/null; then
+            /bin/kill -TERM "$install_race_ruby_pid" 2>/dev/null || true
+        fi
+        wait "$install_race_worker_pid" 2>/dev/null || true
+    fi
     if [[ "$remove_race_ruby_stopped" == true && -n "$remove_race_ruby_pid" ]]; then
         /bin/kill -CONT "$remove_race_ruby_pid" 2>/dev/null || true
     fi
@@ -154,6 +235,9 @@ cleanup() {
     /bin/rm -rf "$scratch_dir"
 }
 trap cleanup EXIT
+
+assert_replace_uses_single_swap
+assert_copy_uses_descriptor_bound_new_file
 
 normalization_race_root="${scratch_dir}/normalization-race-root"
 normalization_race_outside="${scratch_dir}/normalization-race-outside"
@@ -181,44 +265,17 @@ fi
 assert_directory_empty "$normalization_race_outside"
 [[ -L "$normalization_race_root" ]] || fail "root-normalization race link must remain in place"
 
-directory_parse_root="${scratch_dir}/directory-parse"
-directory_parse_first="${directory_parse_root}/first"
-directory_parse_invalid="${directory_parse_root}/invalid"
-directory_parse_last="${directory_parse_root}/last"
-/bin/mkdir -p "$directory_parse_first" "$directory_parse_invalid" "$directory_parse_last" || fail "could not prepare directory-output parsing fixture"
-directory_parse_first_identity="$(file_identity "$directory_parse_first")" || fail "could not identify first parsed directory"
-directory_parse_last_identity="$(file_identity "$directory_parse_last")" || fail "could not identify last parsed directory"
+directory_tracking_root="${scratch_dir}/directory-tracking"
+directory_tracking_target="${directory_tracking_root}/created"
+/bin/mkdir -p "$directory_tracking_root" || fail "could not prepare directory tracking fixture"
 /bin/bash -c '
     source "$1"
-    first_path="$2"
-    first_identity="$3"
-    invalid_path="$4"
-    last_path="$5"
-    last_identity="$6"
-    darwin_ensure_directory_path() {
-        printf "%s\\n%s\\n%s\\ninvalid-identity\\n%s\\n%s\\n" \
-            "$first_path" "$first_identity" "$invalid_path" "$last_path" "$last_identity"
-    }
-    CREATED_DIRECTORIES=("")
-    CREATED_DIRECTORY_IDENTITIES=("")
-    if ensure_directory_path_without_symlinks "$first_path"; then
-        exit 1
-    fi
-    [[ ${#CREATED_DIRECTORIES[@]} -eq 3 ]] || exit 2
-    [[ "${CREATED_DIRECTORIES[1]}" == "$first_path" ]] || exit 3
-    [[ "${CREATED_DIRECTORIES[2]}" == "$last_path" ]] || exit 4
-    cleanup_created_directories || exit 5
-    [[ ! -e "$first_path" && ! -L "$first_path" ]] || exit 6
-    [[ ! -e "$last_path" && ! -L "$last_path" ]] || exit 7
-    [[ -d "$invalid_path" && ! -L "$invalid_path" ]] || exit 8
-    CREATED_DIRECTORIES=("")
-    CREATED_DIRECTORY_IDENTITIES=("")
+    ensure_directory_path_without_symlinks "$2" || exit 1
+    [[ -d "$2" && ! -L "$2" ]] || exit 2
     trap - EXIT
-' bash "${repo_dir}/lib/intel_hidpi_storage.sh" \
-    "$directory_parse_first" "$directory_parse_first_identity" "$directory_parse_invalid" \
-    "$directory_parse_last" "$directory_parse_last_identity" ||
-    fail "directory-output parsing must retain later verifiable cleanup entries"
-assert_directory_exists "$directory_parse_invalid"
+' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$directory_tracking_target" ||
+    fail "directory creation must retain a directory whose ownership cannot be bound to an FD"
+/bin/rmdir "$directory_tracking_target" "$directory_tracking_root" || fail "could not clean directory tracking fixture"
 
 dangling_directory_link="${scratch_dir}/dangling-directory-link"
 dangling_directory_target="${scratch_dir}/missing-directory-target"
@@ -261,6 +318,73 @@ if /bin/bash -c '
 fi
 assert_file_contents "$candidate_hash_path" "changed candidate"
 assert_file_absent "$candidate_hash_target_path"
+
+install_identity_target_path="${scratch_dir}/install-identity-target/DisplayProductID-1a"
+install_identity_candidate_path="${scratch_dir}/install-identity-candidate/DisplayProductID-1a.candidate"
+install_identity_state_dir="${scratch_dir}/install-identity-state/DisplayVendorID-1/DisplayProductID-1a"
+install_identity_manifest_candidate_path="${install_identity_state_dir}/.manifest.candidate"
+install_identity_manifest_path="${install_identity_state_dir}/manifest.plist"
+install_identity_original_target_path="${scratch_dir}/install-identity-installed-target"
+install_identity_worker_output="${scratch_dir}/install-identity-worker-output"
+/bin/mkdir -p "$(/usr/bin/dirname "$install_identity_target_path")" "$(/usr/bin/dirname "$install_identity_candidate_path")" "$install_identity_state_dir" || fail "could not prepare install identity race fixture"
+/usr/sbin/mkfile -n "$REMOVE_RACE_FIXTURE_SIZE" "$install_identity_candidate_path" || fail "could not create install identity race candidate"
+create_pending_manifest "$install_identity_manifest_candidate_path" || fail "could not create install identity manifest candidate"
+install_identity_candidate_hash="$(sha256_file "$install_identity_candidate_path")" || fail "could not hash install identity race candidate"
+install_identity_candidate_identity="$(file_identity "$install_identity_candidate_path")" || fail "could not identify install identity race candidate"
+install_identity_manifest_hash="$(sha256_file "$install_identity_manifest_candidate_path")" || fail "could not hash install identity manifest candidate"
+install_identity_manifest_identity="$(file_identity "$install_identity_manifest_candidate_path")" || fail "could not identify install identity manifest candidate"
+/bin/bash -c '
+    source "$1"
+    commit_apply_state "$2" "$3" false "" "" "$4" "$5" "$6" "$7" "$8" "" "$9" "${10}"
+    operation_status=$?
+    trap - EXIT
+    exit "$operation_status"
+' bash "${repo_dir}/lib/intel_hidpi_storage.sh" \
+    "$install_identity_target_path" "$install_identity_candidate_path" "${install_identity_state_dir}/original.plist" \
+    "$install_identity_manifest_candidate_path" "$install_identity_manifest_path" "$install_identity_candidate_hash" \
+    "$install_identity_manifest_hash" "$install_identity_candidate_identity" "$install_identity_manifest_identity" >"$install_identity_worker_output" 2>&1 &
+install_race_worker_pid=$!
+install_race_ruby_pid="$(find_ruby_holding_path "$install_race_worker_pid" "$install_identity_target_path" "$INSTALL_IDENTITY_RACE_WAIT_SECONDS")" || {
+    /bin/kill -TERM "$install_race_worker_pid" 2>/dev/null || true
+    wait "$install_race_worker_pid" 2>/dev/null || true
+    install_race_worker_pid=""
+    fail "could not observe the installation holding the created target"
+}
+/bin/kill -STOP "$install_race_ruby_pid" || fail "could not pause the installation verification"
+install_race_ruby_stopped=true
+/bin/mv "$install_identity_target_path" "$install_identity_original_target_path" || {
+    /bin/kill -CONT "$install_race_ruby_pid" 2>/dev/null || true
+    install_race_ruby_stopped=false
+    wait "$install_race_worker_pid" 2>/dev/null || true
+    install_race_worker_pid=""
+    fail "could not move the descriptor-bound install target"
+}
+/bin/cp "$install_identity_candidate_path" "$install_identity_target_path" || {
+    /bin/kill -CONT "$install_race_ruby_pid" 2>/dev/null || true
+    install_race_ruby_stopped=false
+    wait "$install_race_worker_pid" 2>/dev/null || true
+    install_race_worker_pid=""
+    fail "could not create the competing same-content install target"
+}
+/bin/kill -CONT "$install_race_ruby_pid" || fail "could not resume the installation verification"
+install_race_ruby_stopped=false
+install_identity_created_target_identity="$(file_identity "$install_identity_original_target_path")" || fail "could not identify the descriptor-bound install target"
+install_identity_competing_target_identity="$(file_identity "$install_identity_target_path")" || fail "could not identify the competing install target"
+[[ "$install_identity_competing_target_identity" != "$install_identity_created_target_identity" ]] || fail "same-content install replacement must use a different inode"
+if wait "$install_race_worker_pid"; then
+    install_race_worker_pid=""
+    fail "install must reject a same-content target replacement after creation"
+fi
+install_race_worker_pid=""
+assert_contains "$(/bin/cat "$install_identity_worker_output")" "target installation may have completed before verification failed; state was retained for manual inspection"
+assert_file_hash "$install_identity_target_path" "$install_identity_candidate_hash"
+[[ "$(file_identity "$install_identity_target_path")" == "$install_identity_competing_target_identity" ]] || fail "install must retain the competing target path"
+assert_file_hash "$install_identity_original_target_path" "$install_identity_candidate_hash"
+[[ "$(file_identity "$install_identity_original_target_path")" == "$install_identity_created_target_identity" ]] || fail "install must retain the descriptor-bound target artifact"
+assert_file_exists "$install_identity_manifest_path"
+[[ "$(/usr/bin/plutil -extract commit-state raw -o - "$install_identity_manifest_path")" == pending ]] || fail "same-content install race must retain a pending manifest"
+install_identity_manifest_candidate_identity="$(/usr/bin/plutil -extract candidate-file-identity raw -o - "$install_identity_manifest_path")" || fail "could not read pending manifest candidate identity"
+[[ -z "$install_identity_manifest_candidate_identity" ]] || fail "pending manifest must not record the competing target identity"
 
 backup_target_path="${scratch_dir}/backup-target/DisplayProductID-2"
 backup_candidate_path="${scratch_dir}/backup-target/.DisplayProductID-2.candidate"
@@ -468,45 +592,30 @@ directory_init_target="${directory_init_created}/${directory_init_component}"
 /bin/mkdir -p "$directory_init_root" || fail "could not prepare directory initialization fixture"
 /bin/bash -c '
     source "$1"
-    CREATED_DIRECTORIES=("")
     if ensure_directory_path_without_symlinks "$2"; then
         exit 1
     fi
-    [[ ${#CREATED_DIRECTORIES[@]} -eq 2 ]] || exit 2
-    expected_created_directory="$(normalize_storage_root "$3")" || exit 3
-    [[ "${CREATED_DIRECTORIES[1]}" == "$expected_created_directory" ]] || exit 4
-    cleanup_created_directories || exit 5
-    [[ ! -e "$3" && ! -L "$3" ]] || exit 6
-    CREATED_DIRECTORIES=("")
+    [[ -d "$3" && ! -L "$3" ]] || exit 2
     trap - EXIT
 ' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$directory_init_target" "$directory_init_created" ||
-    fail "directory initialization failure must report and clean created directories"
+    fail "directory initialization failure must retain an unowned created directory"
+/bin/rmdir "$directory_init_created" "$directory_init_root" || fail "could not clean directory initialization fixture"
 
 directory_identity_root="${scratch_dir}/directory-identity"
 directory_identity_target="${directory_identity_root}/created"
 /bin/mkdir -p "$directory_identity_root" || fail "could not prepare directory identity fixture"
 /bin/bash -c '
     source "$1"
-    CREATED_DIRECTORIES=("")
-    CREATED_DIRECTORY_IDENTITIES=("")
     ensure_directory_path_without_symlinks "$2" || exit 1
-    [[ ${#CREATED_DIRECTORIES[@]} -eq 2 ]] || exit 2
-    [[ ${#CREATED_DIRECTORY_IDENTITIES[@]} -eq 2 ]] || exit 3
-    owned_identity="${CREATED_DIRECTORY_IDENTITIES[1]}"
-    valid_file_identity "$owned_identity" || exit 4
-    /bin/rmdir "$2" || exit 5
-    /bin/mkdir "$2" || exit 6
-    if cleanup_created_directories; then
-        exit 7
-    fi
-    [[ -d "$2" && ! -L "$2" ]] || exit 8
-    CREATED_DIRECTORIES=("")
-    CREATED_DIRECTORY_IDENTITIES=("")
-    /bin/rmdir "$2" || exit 9
-    /bin/rmdir "$(/usr/bin/dirname "$2")" || exit 10
+    /bin/rmdir "$2" || exit 2
+    /bin/mkdir "$2" || exit 3
+    complete_operation_cleanup || exit 4
+    [[ -d "$2" && ! -L "$2" ]] || exit 5
+    /bin/rmdir "$2" || exit 6
+    /bin/rmdir "$(/usr/bin/dirname "$2")" || exit 7
     trap - EXIT
 ' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$directory_identity_target" ||
-    fail "created-directory cleanup must retain a replacement directory"
+    fail "operation cleanup must not claim a replaced directory"
 
 directory_empty_root="${scratch_dir}/directory-empty"
 directory_empty_target="${directory_empty_root}/owned"
@@ -545,61 +654,23 @@ assert_file_contents "${directory_nonempty_target}/sentinel" "competing director
 directory_nonempty_quarantine="$(/usr/bin/find "$directory_nonempty_root" -maxdepth 1 -name '.one-key-hidpi-directory-quarantine-*' -print -quit)" || fail "could not inspect nonempty directory quarantine"
 [[ -z "$directory_nonempty_quarantine" ]] || fail "nonempty directory cleanup must restore the original path"
 
-/bin/bash -c '
-    source "$1"
-    CREATED_DIRECTORIES=("/private/tmp/one-key-hidpi-root-tracking")
-    CREATED_DIRECTORY_IDENTITIES=("1:1")
-    forget_created_directories_within / || exit 2
-    [[ -z "${CREATED_DIRECTORIES[0]}" && -z "${CREATED_DIRECTORY_IDENTITIES[0]}" ]] || exit 3
-    trap - EXIT
-' bash "${repo_dir}/lib/intel_hidpi_storage.sh" ||
-    fail "root directory support and root-scoped tracking cleanup must succeed"
-
-/bin/bash -c '
-    source "$1"
-    CREATED_DIRECTORIES=("/private/tmp/one-key-hidpi-ancestor-tracking")
-    CREATED_DIRECTORY_IDENTITIES=("1:1")
-    forget_created_directories_ancestors_of /private/tmp/one-key-hidpi-ancestor-tracking/Overrides || exit 2
-    [[ -z "${CREATED_DIRECTORIES[0]}" && -z "${CREATED_DIRECTORY_IDENTITIES[0]}" ]] || exit 3
-    trap - EXIT
-' bash "${repo_dir}/lib/intel_hidpi_storage.sh" ||
-    fail "ancestor-scoped tracking cleanup must forget a created root ancestor"
-
-/bin/bash -c '
-    source "$1"
-    CREATED_DIRECTORIES=(
-        "/private/tmp/one-key-hidpi-alias-tracking/Overrides/DisplayVendorID-1"
-        "/private/tmp/one-key-hidpi-alias-tracking/state"
-    )
-    CREATED_DIRECTORY_IDENTITIES=("1:1" "1:2")
-    forget_created_directories_within /tmp/one-key-hidpi-alias-tracking/Overrides || exit 2
-    [[ -z "${CREATED_DIRECTORIES[0]}" && -z "${CREATED_DIRECTORY_IDENTITIES[0]}" ]] || exit 3
-    [[ -n "${CREATED_DIRECTORIES[1]}" && -n "${CREATED_DIRECTORY_IDENTITIES[1]}" ]] || exit 4
-    forget_created_directories_ancestors_of /tmp/one-key-hidpi-alias-tracking/state/DisplayVendorID-1 || exit 5
-    [[ -z "${CREATED_DIRECTORIES[1]}" && -z "${CREATED_DIRECTORY_IDENTITIES[1]}" ]] || exit 6
-    trap - EXIT
-' bash "${repo_dir}/lib/intel_hidpi_storage.sh" ||
-    fail "/tmp aliases must match tracked created directories"
-
 alias_lock_real_root="/private/tmp/one-key-hidpi-alias-lock-${scratch_dir##*/}"
 alias_lock_root="/tmp/${alias_lock_real_root#/private/tmp/}"
 [[ ! -e "$alias_lock_real_root" && ! -L "$alias_lock_real_root" ]] || fail "could not prepare an absent /tmp alias lock root"
 /bin/bash -c '
     source "$1"
     raw_root="$2"
-    normalized_root="$3"
     reset_operation_cleanup_state
     acquire_display_lock "$raw_root" aa bb || exit 1
-    [[ "$OPERATION_LOCK_DIRECTORY_CREATED" == true ]] || exit 2
-    [[ "$OPERATION_LOCK_DIRECTORY" == "${normalized_root}/.one-key-hidpi-locks" ]] || exit 3
-    release_display_lock || exit 4
-    [[ ! -e "${raw_root}/.one-key-hidpi-locks" && ! -L "${raw_root}/.one-key-hidpi-locks" ]] || exit 5
-    cleanup_created_directories || exit 6
-    [[ ! -e "$raw_root" && ! -L "$raw_root" ]] || exit 7
+    [[ "$OPERATION_LOCK_PATH" == "${raw_root}/.one-key-hidpi-locks/DisplayVendorID-aa-DisplayProductID-bb.lock" ]] || exit 2
+    release_display_lock || exit 3
+    [[ -d "${raw_root}/.one-key-hidpi-locks" && ! -L "${raw_root}/.one-key-hidpi-locks" ]] || exit 4
+    [[ -z "$(/usr/bin/find "${raw_root}/.one-key-hidpi-locks" -mindepth 1 -maxdepth 1 -print -quit)" ]] || exit 5
+    /bin/rmdir "${raw_root}/.one-key-hidpi-locks" "$raw_root" || exit 6
     reset_operation_cleanup_state
     trap - EXIT
-' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$alias_lock_root" "$alias_lock_real_root" ||
-    fail "/tmp aliases must preserve lock-directory cleanup tracking"
+' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$alias_lock_root" ||
+    fail "/tmp aliases must retain an unowned lock directory after release"
 
 cleanup_changed_path="${scratch_dir}/cleanup-changed-file"
 printf 'owned temporary artifact\n' > "$cleanup_changed_path"
@@ -691,17 +762,22 @@ assert_file_contents "$directory_replace_candidate_path" "candidate target"
 assert_directory_exists "$directory_replace_target_path"
 assert_directory_empty "$directory_replace_target_path"
 
-swap_directory_candidate_path="$scratch_dir/swap-directory-candidate"
-swap_directory_target_path="$scratch_dir/swap-directory-target"
-swap_directory_sentinel_path="$swap_directory_target_path/competing-sentinel"
-/bin/dd if=/dev/zero of="$swap_directory_candidate_path" bs=1048576 count=16 >/dev/null 2>&1 || fail "could not create staged swap-race candidate"
-printf 'original target\n' > "$swap_directory_target_path"
-swap_directory_output=""
-if ! swap_directory_output="$(/bin/bash -c '
+pre_swap_directory_root="$scratch_dir/pre-swap-directory"
+pre_swap_directory_candidate_path="$pre_swap_directory_root/candidate"
+pre_swap_directory_target_path="$pre_swap_directory_root/target"
+# Hashing the staged candidate creates a reproducible interval between cloning
+# and the first swap. The attacker must not be able to exchange its directory
+# into target during that interval.
+/bin/mkdir -p "$pre_swap_directory_root" || fail "could not create pre-swap staged race directory"
+/bin/dd if=/dev/zero of="$pre_swap_directory_candidate_path" bs=1048576 count=64 >/dev/null 2>&1 || fail "could not create pre-swap staged race candidate"
+printf 'original target\n' > "$pre_swap_directory_target_path"
+pre_swap_directory_original_hash="$(sha256_file "$pre_swap_directory_target_path")"
+pre_swap_directory_candidate_hash="$(sha256_file "$pre_swap_directory_candidate_path")"
+pre_swap_directory_output=""
+if ! pre_swap_directory_output="$(/bin/bash -c '
     source "$1"
     candidate_path="$2"
     target_path="$3"
-    sentinel_path="$4"
     target_hash="$(sha256_file "$target_path")"
     candidate_hash="$(sha256_file "$candidate_path")"
     target_identity="$(darwin_file_identity "$target_path")"
@@ -710,10 +786,10 @@ if ! swap_directory_output="$(/bin/bash -c '
         deadline=$((SECONDS + 10))
         while ((SECONDS < deadline)); do
             for staged_path in "$(/usr/bin/dirname "$target_path")"/.one-key-hidpi-stage-*; do
-                [[ -e "$staged_path" ]] || continue
-                /bin/rm -f "$target_path" || exit 2
-                /bin/mkdir "$target_path" || exit 3
-                printf "competing directory\n" > "$sentinel_path" || exit 4
+                [[ -f "$staged_path" && ! -L "$staged_path" ]] || continue
+                /bin/rm -f "$staged_path" || exit 2
+                /bin/mkdir "$staged_path" || exit 3
+                printf "competing pre-swap staged directory\n" > "$staged_path/sentinel" || exit 4
                 exit 0
             done
         done
@@ -727,16 +803,130 @@ if ! swap_directory_output="$(/bin/bash -c '
         exit 1
     fi
     wait "$attacker_pid" || exit 2
-    [[ "$operation_status" -eq 1 ]] || exit 3
-' bash "$repo_dir/lib/intel_hidpi_storage.sh" "$swap_directory_candidate_path" "$swap_directory_target_path" "$swap_directory_sentinel_path" 2>&1)"; then
-    fail "replacement must restore a target changed to a directory after staging"
+    [[ "$operation_status" -eq 2 ]] || exit 3
+' bash "$repo_dir/lib/intel_hidpi_storage.sh" "$pre_swap_directory_candidate_path" "$pre_swap_directory_target_path" 2>&1)"; then
+    fail "replacement must refuse a staged path replaced before the first swap"
 fi
-assert_contains "$swap_directory_output" "target changed during replacement; target was restored and no override was written"
-assert_directory_exists "$swap_directory_target_path"
-assert_file_contents "$swap_directory_sentinel_path" "competing directory"
+assert_contains "$pre_swap_directory_output" "replacement did not start and staged recovery artifact was retained"
+assert_file_hash "$pre_swap_directory_target_path" "$pre_swap_directory_original_hash"
+assert_file_hash "$pre_swap_directory_candidate_path" "$pre_swap_directory_candidate_hash"
+pre_swap_directory_stage_path="$(/usr/bin/find "$(/usr/bin/dirname "$pre_swap_directory_target_path")" -maxdepth 1 -name '.one-key-hidpi-stage-*' -print -quit)" || fail "could not inspect pre-swap staged race directory"
+[[ -n "$pre_swap_directory_stage_path" ]] || fail "pre-swap staged replacement must be retained"
+assert_directory_exists "$pre_swap_directory_stage_path"
+assert_file_contents "$pre_swap_directory_stage_path/sentinel" "competing pre-swap staged directory"
+
+swap_directory_root="$scratch_dir/swap-directory"
+swap_directory_candidate_path="$swap_directory_root/candidate"
+swap_directory_target_path="$swap_directory_root/target"
+# The structural assertion above proves this code path cannot perform a second
+# swap. A larger candidate keeps post-swap hash verification active long enough
+# to exercise the retained-artifact outcome when the displaced staged path changes.
+/bin/mkdir -p "$swap_directory_root" || fail "could not create staged swap-race directory"
+/bin/dd if=/dev/zero of="$swap_directory_candidate_path" bs=1048576 count=64 >/dev/null 2>&1 || fail "could not create staged swap-race candidate"
+printf 'original target\n' > "$swap_directory_target_path"
+swap_directory_output=""
+if ! swap_directory_output="$(/bin/bash -c '
+    source "$1"
+    candidate_path="$2"
+    target_path="$3"
+    target_hash="$(sha256_file "$target_path")"
+    candidate_hash="$(sha256_file "$candidate_path")"
+    target_identity="$(darwin_file_identity "$target_path")"
+    candidate_identity="$(darwin_file_identity "$candidate_path")"
+    (
+        deadline=$((SECONDS + 10))
+        while ((SECONDS < deadline)); do
+            for staged_path in "$(/usr/bin/dirname "$target_path")"/.one-key-hidpi-stage-*; do
+                [[ -e "$staged_path" ]] || continue
+                target_first_byte="$(/usr/bin/od -An -tx1 -N1 "$target_path" | /usr/bin/tr -d "[:space:]")" || exit 2
+                # The original target starts with "o". A zero byte proves the
+                # initial RENAME_SWAP has already moved the candidate into target.
+                [[ "$target_first_byte" == "00" ]] || continue
+                /bin/rm -f "$staged_path" || exit 2
+                /bin/mkdir "$staged_path" || exit 3
+                printf "competing staged directory\n" > "$staged_path/sentinel" || exit 4
+                exit 0
+            done
+        done
+        exit 5
+    ) &
+    attacker_pid=$!
+    replace_file_without_following_directory_link "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity" "$target_hash" "$target_identity"
+    operation_status=$?
+    if ((operation_status == 0)); then
+        wait "$attacker_pid"
+        exit 1
+    fi
+    wait "$attacker_pid" || exit 2
+    [[ "$operation_status" -eq 2 ]] || exit 3
+' bash "$repo_dir/lib/intel_hidpi_storage.sh" "$swap_directory_candidate_path" "$swap_directory_target_path" 2>&1)"; then
+    fail "replacement must retain the candidate target when the staged path changes after swap"
+fi
+assert_contains "$swap_directory_output" "replacement verification failed after swap; retained target and staged path for manual inspection"
+assert_file_hash "$swap_directory_target_path" "$(sha256_file "$swap_directory_candidate_path")"
 assert_file_exists "$swap_directory_candidate_path"
-swap_directory_internal_entries="$(/usr/bin/find "$(/usr/bin/dirname "$swap_directory_target_path")" -maxdepth 1 -name '.one-key-hidpi-*' -print -quit)" || fail "could not inspect swap race directory"
-[[ -z "$swap_directory_internal_entries" ]] || fail "replacement must not retain a hidden stage entry after a directory race"
+swap_directory_stage_path="$(/usr/bin/find "$(/usr/bin/dirname "$swap_directory_target_path")" -maxdepth 1 -name '.one-key-hidpi-stage-*' -print -quit)" || fail "could not inspect staged race directory"
+[[ -n "$swap_directory_stage_path" ]] || fail "replacement must retain the competing staged path"
+assert_directory_exists "$swap_directory_stage_path"
+assert_file_contents "$swap_directory_stage_path/sentinel" "competing staged directory"
+
+swap_identity_root="$scratch_dir/swap-identity"
+swap_identity_candidate_path="$swap_identity_root/candidate"
+swap_identity_target_path="$swap_identity_root/target"
+swap_identity_original_copy_path="$swap_identity_root/original-copy"
+# Replacing the displaced staged file with equal bytes must still fail because
+# its inode is not the original target inode. The target remains the first-swap
+# candidate and no compensating swap may run.
+/bin/mkdir -p "$swap_identity_root" || fail "could not create same-content staged race directory"
+/bin/dd if=/dev/zero of="$swap_identity_candidate_path" bs=1048576 count=64 >/dev/null 2>&1 || fail "could not create same-content staged race candidate"
+printf 'original target\n' > "$swap_identity_target_path"
+/bin/cp "$swap_identity_target_path" "$swap_identity_original_copy_path" || fail "could not preserve same-content staged race original"
+swap_identity_candidate_hash="$(sha256_file "$swap_identity_candidate_path")"
+swap_identity_original_hash="$(sha256_file "$swap_identity_target_path")"
+swap_identity_original_identity="$(file_identity "$swap_identity_target_path")"
+swap_identity_output=""
+if ! swap_identity_output="$(/bin/bash -c '
+    source "$1"
+    candidate_path="$2"
+    target_path="$3"
+    original_copy_path="$4"
+    target_hash="$(sha256_file "$target_path")"
+    candidate_hash="$(sha256_file "$candidate_path")"
+    target_identity="$(darwin_file_identity "$target_path")"
+    candidate_identity="$(darwin_file_identity "$candidate_path")"
+    (
+        deadline=$((SECONDS + 10))
+        while ((SECONDS < deadline)); do
+            for staged_path in "$(/usr/bin/dirname "$target_path")"/.one-key-hidpi-stage-*; do
+                [[ -f "$staged_path" && ! -L "$staged_path" ]] || continue
+                target_first_byte="$(/usr/bin/od -An -tx1 -N1 "$target_path" | /usr/bin/tr -d "[:space:]")" || exit 2
+                [[ "$target_first_byte" == "00" ]] || continue
+                /bin/rm -f "$staged_path" || exit 3
+                /bin/cp "$original_copy_path" "$staged_path" || exit 4
+                exit 0
+            done
+        done
+        exit 5
+    ) &
+    attacker_pid=$!
+    replace_file_without_following_directory_link "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity" "$target_hash" "$target_identity"
+    operation_status=$?
+    if ((operation_status == 0)); then
+        wait "$attacker_pid"
+        exit 1
+    fi
+    wait "$attacker_pid" || exit 2
+    [[ "$operation_status" -eq 2 ]] || exit 3
+' bash "$repo_dir/lib/intel_hidpi_storage.sh" "$swap_identity_candidate_path" "$swap_identity_target_path" "$swap_identity_original_copy_path" 2>&1)"; then
+    fail "replacement must reject a same-content staged inode replacement after swap"
+fi
+assert_contains "$swap_identity_output" "replacement verification failed after swap; retained target and staged path for manual inspection"
+assert_file_hash "$swap_identity_target_path" "$swap_identity_candidate_hash"
+swap_identity_stage_path="$(/usr/bin/find "$(/usr/bin/dirname "$swap_identity_target_path")" -maxdepth 1 -name '.one-key-hidpi-stage-*' -print -quit)" || fail "could not inspect same-content staged race path"
+[[ -n "$swap_identity_stage_path" ]] || fail "same-content staged race must retain the competing staged file"
+assert_file_hash "$swap_identity_stage_path" "$swap_identity_original_hash"
+[[ "$(file_identity "$swap_identity_stage_path")" != "$swap_identity_original_identity" ]] || fail "same-content staged replacement must use a different inode"
+
 manifest_read_overrides_root="${scratch_dir}/manifest-read-overrides"
 manifest_read_state_root="${scratch_dir}/manifest-read-state"
 manifest_read_target_path="${manifest_read_overrides_root}/DisplayVendorID-20/DisplayProductID-21"
