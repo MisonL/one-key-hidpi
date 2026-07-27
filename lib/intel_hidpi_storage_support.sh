@@ -395,6 +395,18 @@ valid_file_identity() {
     [[ "$1" =~ ^[0-9]+:[0-9]+$ ]]
 }
 
+valid_persistent_file_identity() {
+    [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]
+}
+
+current_boot_session() {
+    local boot_time
+
+    boot_time="$(/usr/sbin/sysctl -n kern.boottime 2>/dev/null)" || return 1
+    [[ "$boot_time" =~ sec[[:space:]]*=[[:space:]]*([0-9]+),[[:space:]]*usec[[:space:]]*=[[:space:]]*([0-9]+) ]] || return 1
+    printf '%s:%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
 file_matches_hash() {
     local path="$1"
     local expected_hash="$2"
@@ -419,6 +431,33 @@ file_matches_snapshot() {
     snapshot="$(darwin_file_snapshot "$path")" || return 1
     IFS='|' read -r current_hash current_identity <<< "$snapshot"
     [[ "$current_hash" == "$expected_hash" && "$current_identity" == "$expected_identity" ]]
+}
+
+file_matches_persistent_snapshot() {
+    local path="$1"
+    local expected_hash="$2"
+    local expected_identity="$3"
+    local expected_persistent_identity="$4"
+    local snapshot
+    local current_hash
+    local current_identity
+    local current_persistent_identity
+
+    valid_sha256 "$expected_hash" || return 1
+    valid_file_identity "$expected_identity" || return 1
+    valid_persistent_file_identity "$expected_persistent_identity" || return 1
+    snapshot="$(darwin_file_persistent_snapshot "$path")" || return 1
+    IFS='|' read -r current_hash current_identity current_persistent_identity <<< "$snapshot"
+    [[ "$current_hash" == "$expected_hash" && "$current_identity" == "$expected_identity" && "$current_persistent_identity" == "$expected_persistent_identity" ]]
+}
+
+legacy_file_identity_matches_inode() {
+    local expected_identity="$1"
+    local current_identity="$2"
+
+    valid_file_identity "$expected_identity" || return 1
+    valid_file_identity "$current_identity" || return 1
+    [[ "${expected_identity#*:}" == "${current_identity#*:}" ]]
 }
 
 run_plutil_and_update_hash() {
@@ -597,12 +636,15 @@ target_matches_pre_apply_state() {
     local target_existed="$2"
     local original_hash="$3"
     local original_identity="$4"
+    local original_persistent_identity="${5:-}"
 
     if [[ "$target_existed" == true ]]; then
-        file_matches_snapshot "$target_path" "$original_hash" "$original_identity"
-    else
-        [[ ! -e "$target_path" && ! -L "$target_path" ]]
+        valid_persistent_file_identity "$original_persistent_identity" || return 1
+        file_matches_persistent_snapshot "$target_path" "$original_hash" "$original_identity" "$original_persistent_identity"
+        return
     fi
+    [[ "$target_existed" == false ]] || return 1
+    [[ ! -e "$target_path" && ! -L "$target_path" ]]
 }
 
 install_file_without_replacement() {
@@ -615,6 +657,32 @@ install_file_without_replacement() {
     valid_sha256 "$expected_hash" || return 1
     valid_file_identity "$expected_identity" || return 1
     darwin_install_file_without_replacement "$candidate_path" "$target_path" "$expected_hash" "$expected_identity"
+}
+
+install_file_without_replacement_persistent() {
+    local candidate_path="$1"
+    local target_path="$2"
+    local expected_hash="${3:-}"
+    local expected_identity="${4:-}"
+
+    [[ -f "$candidate_path" && ! -L "$candidate_path" ]] || return 1
+    valid_sha256 "$expected_hash" || return 1
+    valid_file_identity "$expected_identity" || return 1
+    darwin_install_file_without_replacement_persistent "$candidate_path" "$target_path" "$expected_hash" "$expected_identity"
+}
+
+install_file_without_replacement_persistent_source() {
+    local candidate_path="$1"
+    local target_path="$2"
+    local expected_hash="$3"
+    local expected_identity="$4"
+    local expected_persistent_identity="$5"
+
+    [[ -f "$candidate_path" && ! -L "$candidate_path" ]] || return 1
+    valid_sha256 "$expected_hash" || return 1
+    valid_file_identity "$expected_identity" || return 1
+    valid_persistent_file_identity "$expected_persistent_identity" || return 1
+    darwin_install_file_without_replacement_persistent_source "$candidate_path" "$target_path" "$expected_hash" "$expected_identity" "$expected_persistent_identity"
 }
 
 replace_file_without_following_directory_link() {
@@ -631,11 +699,29 @@ replace_file_without_following_directory_link() {
     darwin_replace_file "$candidate_path" "$target_path" "$expected_candidate_hash" "$expected_candidate_identity" "$expected_target_hash" "$expected_target_identity"
 }
 
+replace_file_without_following_directory_link_persistent() {
+    local candidate_path="$1"
+    local target_path="$2"
+    local expected_candidate_hash="$3"
+    local expected_candidate_identity="$4"
+    local expected_target_hash="$5"
+    local expected_target_identity="$6"
+    local expected_target_persistent_identity="$7"
+
+    valid_sha256 "$expected_candidate_hash" || return 1
+    valid_file_identity "$expected_candidate_identity" || return 1
+    valid_sha256 "$expected_target_hash" || return 1
+    valid_file_identity "$expected_target_identity" || return 1
+    valid_persistent_file_identity "$expected_target_persistent_identity" || return 1
+    darwin_replace_file_persistent "$candidate_path" "$target_path" "$expected_candidate_hash" "$expected_candidate_identity" "$expected_target_hash" "$expected_target_identity" "$expected_target_persistent_identity"
+}
+
 copy_file_and_verify_hash() {
     local source_path="$1"
     local candidate_path="$2"
     local expected_hash="$3"
     local expected_source_identity="$4"
+    local expected_source_persistent_identity="${5:-}"
     local temporary_hash
     local temporary_identity
     local installed_snapshot
@@ -644,13 +730,14 @@ copy_file_and_verify_hash() {
 
     valid_sha256 "$expected_hash" || return 1
     valid_file_identity "$expected_source_identity" || return 1
+    valid_persistent_file_identity "$expected_source_persistent_identity" || return 1
     [[ -f "$source_path" && ! -L "$source_path" ]] || return 1
     temporary_hash="$(temporary_file_expected_hash "$candidate_path")" || return 1
     temporary_identity="$(temporary_file_expected_identity "$candidate_path")" || return 1
     valid_sha256 "$temporary_hash" || return 1
     valid_file_identity "$temporary_identity" || return 1
     remove_file_if_unchanged "$candidate_path" "$temporary_hash" "$temporary_identity" || return 1
-    installed_snapshot="$(install_file_without_replacement "$source_path" "$candidate_path" "$expected_hash" "$expected_source_identity")" || return 1
+    installed_snapshot="$(install_file_without_replacement_persistent_source "$source_path" "$candidate_path" "$expected_hash" "$expected_source_identity" "$expected_source_persistent_identity")" || return 1
     IFS='|' read -r installed_hash installed_identity <<< "$installed_snapshot"
     [[ "$installed_hash" == "$expected_hash" ]] || return 1
     valid_file_identity "$installed_identity" || return 1
@@ -666,5 +753,18 @@ remove_file_if_unchanged() {
     valid_sha256 "$expected_hash" || return 1
     valid_file_identity "$expected_identity" || return 1
     darwin_remove_file_if_unchanged "$target_path" "$expected_hash" "$expected_identity" || return 1
+    [[ ! -e "$target_path" && ! -L "$target_path" ]]
+}
+
+remove_file_if_unchanged_persistent() {
+    local target_path="$1"
+    local expected_hash="$2"
+    local expected_identity="$3"
+    local expected_persistent_identity="$4"
+
+    valid_sha256 "$expected_hash" || return 1
+    valid_file_identity "$expected_identity" || return 1
+    valid_persistent_file_identity "$expected_persistent_identity" || return 1
+    darwin_remove_file_if_unchanged_persistent "$target_path" "$expected_hash" "$expected_identity" "$expected_persistent_identity" || return 1
     [[ ! -e "$target_path" && ! -L "$target_path" ]]
 }

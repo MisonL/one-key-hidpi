@@ -240,8 +240,26 @@ darwin_secure_fs() {
             "#{stat.dev}:#{stat.ino}"
         end
 
+        def persistent_file_identity(fd)
+            stat = IO.for_fd(fd, autoclose: false).stat
+            "#{stat.ino}:#{stat.birthtime.to_i}:#{stat.birthtime.nsec}"
+        end
+
+        def valid_persistent_identity_text?(expected_identity)
+            expected_identity.is_a?(String) && expected_identity.match?(/\A[0-9]+:[0-9]+:[0-9]+\z/)
+        end
+
+        def expected_persistent_identity?(fd, expected_identity)
+            Failure.raise_failure unless valid_persistent_identity_text?(expected_identity)
+            persistent_file_identity(fd) == expected_identity
+        end
+
         def file_snapshot(fd)
             "#{sha256_fd(fd)}|#{file_identity(fd)}"
+        end
+
+        def persistent_file_snapshot(fd)
+            "#{sha256_fd(fd)}|#{file_identity(fd)}|#{persistent_file_identity(fd)}"
         end
 
         def valid_identity_text?(expected_identity)
@@ -363,7 +381,7 @@ darwin_secure_fs() {
             path_still_names_entry_fd?(directory_fd, original_name, quarantined_fd)
         end
 
-        def remove_verified_named_file(directory_fd, name, named_fd, expected_hash, expected_identity, label)
+        def remove_verified_named_file(directory_fd, name, named_fd, expected_hash, expected_identity, label, expected_persistent_identity: nil)
             quarantine_name = unique_internal_name("quarantine")
             result = DarwinSecureFs.renameatx_np(
                 directory_fd,
@@ -380,7 +398,8 @@ darwin_secure_fs() {
                 (IO.for_fd(quarantine_fd, autoclose: false).stat.nlink == 1) &&
                 same_file?(quarantine_fd, named_fd) &&
                 expected_sha256?(quarantine_fd, expected_hash) &&
-                expected_identity?(quarantine_fd, expected_identity)
+                expected_identity?(quarantine_fd, expected_identity) &&
+                (expected_persistent_identity.nil? || expected_persistent_identity?(quarantine_fd, expected_persistent_identity))
             unless matches
                 restored = quarantine_fd &&
                     restore_quarantined_file(directory_fd, quarantine_name, name, quarantine_fd)
@@ -492,8 +511,8 @@ darwin_secure_fs() {
         when "ensure-directory"
             directory_fd = open_directory_path(arguments.fetch(0), create: true)
             DarwinSecureFs.close(directory_fd)
-        when "install"
-            source_path, target_path, expected_hash, expected_identity = arguments
+        when "install", "install-persistent", "install-persistent-source"
+            source_path, target_path, expected_hash, expected_identity, expected_source_persistent_identity = arguments
             source_directory, source_name = split_file_path(source_path)
             target_directory, target_name = split_file_path(target_path)
             source_directory_fd = open_directory_path(source_directory)
@@ -501,6 +520,9 @@ darwin_secure_fs() {
             source_fd = open_regular_file(source_directory_fd, source_name)
             Failure.raise_failure unless expected_sha256?(source_fd, expected_hash)
             Failure.raise_failure unless expected_identity?(source_fd, expected_identity)
+            if operation == "install-persistent-source"
+                Failure.raise_failure unless expected_persistent_identity?(source_fd, expected_source_persistent_identity)
+            end
             installed_fd = copy_fd_to_new_file(source_fd, target_directory_fd, target_name)
             target_fd = open_regular_file(target_directory_fd, target_name)
             installed_matches = same_file?(installed_fd, target_fd) &&
@@ -515,7 +537,11 @@ darwin_secure_fs() {
                 warn "error: installation verification failed after target creation; manual inspection required"
                 exit 2
             end
-            puts file_snapshot(installed_fd)
+            if operation == "install-persistent"
+                puts persistent_file_snapshot(installed_fd)
+            else
+                puts file_snapshot(installed_fd)
+            end
             DarwinSecureFs.close(target_fd)
             DarwinSecureFs.close(installed_fd)
             DarwinSecureFs.close(source_fd)
@@ -535,6 +561,22 @@ darwin_secure_fs() {
             target_directory_fd = open_directory_path(target_directory)
             target_fd = open_regular_file(target_directory_fd, target_name)
             puts file_identity(target_fd)
+            DarwinSecureFs.close(target_fd)
+            DarwinSecureFs.close(target_directory_fd)
+        when "persistent-identity"
+            target_path = arguments.fetch(0)
+            target_directory, target_name = split_file_path(target_path)
+            target_directory_fd = open_directory_path(target_directory)
+            target_fd = open_regular_file(target_directory_fd, target_name)
+            puts persistent_file_identity(target_fd)
+            DarwinSecureFs.close(target_fd)
+            DarwinSecureFs.close(target_directory_fd)
+        when "persistent-snapshot"
+            target_path = arguments.fetch(0)
+            target_directory, target_name = split_file_path(target_path)
+            target_directory_fd = open_directory_path(target_directory)
+            target_fd = open_regular_file(target_directory_fd, target_name)
+            puts persistent_file_snapshot(target_fd)
             DarwinSecureFs.close(target_fd)
             DarwinSecureFs.close(target_directory_fd)
         when "directory-identity"
@@ -599,8 +641,8 @@ darwin_secure_fs() {
             puts "#{sha256_fd(target_fd)}|#{file_identity(target_fd)}"
             DarwinSecureFs.close(target_fd)
             DarwinSecureFs.close(target_directory_fd)
-        when "replace"
-            source_path, target_path, expected_source_hash, expected_source_identity, expected_target_hash, expected_target_identity = arguments
+        when "replace", "replace-persistent"
+            source_path, target_path, expected_source_hash, expected_source_identity, expected_target_hash, expected_target_identity, expected_target_persistent_identity = arguments
             source_directory, source_name = split_file_path(source_path)
             target_directory, target_name = split_file_path(target_path)
             source_directory_fd = open_directory_path(source_directory)
@@ -611,6 +653,9 @@ darwin_secure_fs() {
             Failure.raise_failure unless expected_identity?(source_fd, expected_source_identity)
             Failure.raise_failure unless expected_sha256?(target_fd, expected_target_hash)
             Failure.raise_failure unless expected_identity?(target_fd, expected_target_identity)
+            if operation == "replace-persistent"
+                Failure.raise_failure unless expected_persistent_identity?(target_fd, expected_target_persistent_identity)
+            end
             Failure.raise_failure unless path_still_names_fd?(target_directory_fd, target_name, target_fd)
             staged_name = ".one-key-hidpi-stage-#{Process.pid}-#{SecureRandom.hex(12)}"
             staged_fd = copy_fd_to_new_file(source_fd, target_directory_fd, staged_name)
@@ -619,7 +664,8 @@ darwin_secure_fs() {
             staged_path_matches = path_still_names_fd?(target_directory_fd, staged_name, staged_fd) &&
                 expected_sha256?(staged_fd, expected_source_hash)
             target_path_matches = path_still_names_fd?(target_directory_fd, target_name, target_fd) &&
-                expected_sha256?(target_fd, expected_target_hash)
+                expected_sha256?(target_fd, expected_target_hash) &&
+                (operation != "replace-persistent" || expected_persistent_identity?(target_fd, expected_target_persistent_identity))
             unless staged_path_matches && target_path_matches
                 staged_removed = false
                 if staged_path_matches
@@ -681,6 +727,7 @@ darwin_secure_fs() {
                 same_file?(moved_previous_fd, target_fd) &&
                 expected_sha256?(moved_previous_fd, expected_target_hash) &&
                 expected_identity?(moved_previous_fd, expected_target_identity) &&
+                (operation != "replace-persistent" || expected_persistent_identity?(moved_previous_fd, expected_target_persistent_identity)) &&
                 path_still_names_fd?(target_directory_fd, staged_name, moved_previous_fd)
             unless target_matches && previous_matches
                 DarwinSecureFs.close(new_target_fd) if new_target_fd
@@ -693,7 +740,11 @@ darwin_secure_fs() {
                 warn "error: replacement verification failed after swap; retained target and staged path for manual inspection"
                 exit 2
             end
-            installed_snapshot = file_snapshot(new_target_fd)
+            installed_snapshot = if operation == "replace-persistent"
+                persistent_file_snapshot(new_target_fd)
+            else
+                file_snapshot(new_target_fd)
+            end
             displaced_removed = remove_verified_named_file(
                 target_directory_fd,
                 staged_name,
@@ -701,6 +752,7 @@ darwin_secure_fs() {
                 expected_target_hash,
                 expected_target_identity,
                 "displaced target",
+                expected_persistent_identity: operation == "replace-persistent" ? expected_target_persistent_identity : nil,
             )
             DarwinSecureFs.close(new_target_fd)
             DarwinSecureFs.close(moved_previous_fd)
@@ -718,13 +770,16 @@ darwin_secure_fs() {
             DarwinSecureFs.close(source_fd)
             DarwinSecureFs.close(target_directory_fd)
             DarwinSecureFs.close(source_directory_fd)
-        when "remove"
-            target_path, expected_hash, expected_identity = arguments
+        when "remove", "remove-persistent"
+            target_path, expected_hash, expected_identity, expected_persistent_identity = arguments
             target_directory, target_name = split_file_path(target_path)
             target_directory_fd = open_directory_path(target_directory)
             target_fd = open_regular_file(target_directory_fd, target_name)
             Failure.raise_failure unless expected_sha256?(target_fd, expected_hash)
             Failure.raise_failure unless expected_identity?(target_fd, expected_identity)
+            if operation == "remove-persistent"
+                Failure.raise_failure unless expected_persistent_identity?(target_fd, expected_persistent_identity)
+            end
             removed = remove_verified_named_file(
                 target_directory_fd,
                 target_name,
@@ -732,6 +787,7 @@ darwin_secure_fs() {
                 expected_hash,
                 expected_identity,
                 "file removal",
+                expected_persistent_identity: operation == "remove-persistent" ? expected_persistent_identity : nil,
             )
             DarwinSecureFs.close(target_fd)
             DarwinSecureFs.close(target_directory_fd)
@@ -808,12 +864,39 @@ darwin_install_file_without_replacement() {
     darwin_secure_fs install "$source_path" "$target_path" "$expected_hash" "$expected_identity"
 }
 
+darwin_install_file_without_replacement_persistent() {
+    local source_path="$1"
+    local target_path="$2"
+    local expected_hash="$3"
+    local expected_identity="$4"
+
+    darwin_secure_fs install-persistent "$source_path" "$target_path" "$expected_hash" "$expected_identity"
+}
+
+darwin_install_file_without_replacement_persistent_source() {
+    local source_path="$1"
+    local target_path="$2"
+    local expected_hash="$3"
+    local expected_identity="$4"
+    local expected_persistent_identity="$5"
+
+    darwin_secure_fs install-persistent-source "$source_path" "$target_path" "$expected_hash" "$expected_identity" "$expected_persistent_identity"
+}
+
 darwin_sha256_file() {
     darwin_secure_fs hash "$1"
 }
 
 darwin_file_identity() {
     darwin_secure_fs identity "$1"
+}
+
+darwin_file_persistent_identity() {
+    darwin_secure_fs persistent-identity "$1"
+}
+
+darwin_file_persistent_snapshot() {
+    darwin_secure_fs persistent-snapshot "$1"
 }
 
 darwin_directory_identity() {
@@ -844,8 +927,24 @@ darwin_replace_file() {
     darwin_secure_fs replace "$source_path" "$target_path" "$expected_source_hash" "$expected_source_identity" "$expected_target_hash" "$expected_target_identity"
 }
 
+darwin_replace_file_persistent() {
+    local source_path="$1"
+    local target_path="$2"
+    local expected_source_hash="$3"
+    local expected_source_identity="$4"
+    local expected_target_hash="$5"
+    local expected_target_identity="$6"
+    local expected_target_persistent_identity="$7"
+
+    darwin_secure_fs replace-persistent "$source_path" "$target_path" "$expected_source_hash" "$expected_source_identity" "$expected_target_hash" "$expected_target_identity" "$expected_target_persistent_identity"
+}
+
 darwin_remove_file_if_unchanged() {
     darwin_secure_fs remove "$1" "$2" "$3"
+}
+
+darwin_remove_file_if_unchanged_persistent() {
+    darwin_secure_fs remove-persistent "$1" "$2" "$3" "$4"
 }
 
 darwin_remove_empty_directory_if_unchanged() {

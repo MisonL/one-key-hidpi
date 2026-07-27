@@ -89,6 +89,38 @@ file_identity() {
     /usr/bin/stat -f '%d:%i' "$1"
 }
 
+file_identity_with_changed_device() {
+    local identity="$1"
+    local device_id="${identity%%:*}"
+    local inode_id="${identity#*:}"
+
+    [[ "$device_id" =~ ^[0-9]+$ && "$inode_id" =~ ^[0-9]+$ ]] || return 1
+    printf '%s:%s\n' "$((device_id + 1))" "$inode_id"
+}
+
+persistent_file_identity() {
+    /usr/bin/ruby -e '
+        file_stat = File.stat(ARGV.fetch(0))
+        puts "#{file_stat.ino}:#{file_stat.birthtime.to_i}:#{file_stat.birthtime.nsec}"
+    ' "$1"
+}
+
+test_boot_session() {
+    local boot_time
+
+    boot_time="$(/usr/sbin/sysctl -n kern.boottime)" || return 1
+    [[ "$boot_time" =~ sec[[:space:]]*=[[:space:]]*([0-9]+),[[:space:]]*usec[[:space:]]*=[[:space:]]*([0-9]+) ]] || return 1
+    printf '%s:%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
+remove_v5_manifest_fields() {
+    local manifest_path="$1"
+
+    /usr/bin/plutil -remove boot-session "$manifest_path" || return 1
+    /usr/bin/plutil -remove candidate-persistent-identity "$manifest_path" || return 1
+    /usr/bin/plutil -remove original-persistent-identity "$manifest_path"
+}
+
 assert_manifest_file_identity() {
     local manifest_path="$1"
     local key_path="$2"
@@ -138,7 +170,7 @@ assert_file_exists "$original_path"
 assert_file_mode "$target_path" 644
 assert_file_mode "$manifest_path" 644
 assert_file_mode "$original_path" 600
-assert_plist_value "$manifest_path" manifest-version 4
+assert_plist_value "$manifest_path" manifest-version 5
 assert_plist_value "$manifest_path" commit-state committed
 assert_plist_value "$manifest_path" overrides-root "$normalized_overrides_root"
 assert_plist_value "$manifest_path" target-existed true
@@ -147,6 +179,9 @@ assert_plist_value "$manifest_path" original-sha256 "$existing_original_hash"
 assert_plist_value "$manifest_path" candidate-sha256 "$candidate_hash"
 assert_manifest_file_identity "$manifest_path" candidate-file-identity "$target_path"
 assert_manifest_file_identity "$manifest_path" original-file-identity "$original_path"
+assert_plist_value "$manifest_path" boot-session "$(test_boot_session)"
+assert_plist_value "$manifest_path" candidate-persistent-identity "$(persistent_file_identity "$target_path")"
+assert_plist_value "$manifest_path" original-persistent-identity "$(persistent_file_identity "$original_path")"
 assert_plist_value "$manifest_path" payloads.0 AAANAAAAB1A=
 assert_plist_value "$manifest_path" payloads.5 AAAeAAAAEOAAAAABACAAAA==
 /usr/bin/cmp -s "${scratch_dir}/original-existing.plist" "$original_path" || fail "backup must preserve the exact original override"
@@ -220,7 +255,10 @@ assert_plist_value "$new_manifest_path" commit-state committed
 assert_plist_value "$new_manifest_path" original-sha256 ""
 assert_plist_value "$new_manifest_path" candidate-sha256 "$(sha256_file "$new_target_path")"
 assert_manifest_file_identity "$new_manifest_path" candidate-file-identity "$new_target_path"
+assert_plist_value "$new_manifest_path" boot-session "$(test_boot_session)"
+assert_plist_value "$new_manifest_path" candidate-persistent-identity "$(persistent_file_identity "$new_target_path")"
 assert_plist_value "$new_manifest_path" original-file-identity ""
+assert_plist_value "$new_manifest_path" original-persistent-identity ""
 assert_file_mode "$new_target_path" 644
 
 "${repo_dir}/intel-hidpi.sh" revert \
@@ -313,10 +351,239 @@ if backup_identity_output="$("${repo_dir}/intel-hidpi.sh" revert \
     --confirm 2>&1)"; then
     fail "revert must reject a same-content original backup with a different identity"
 fi
-assert_contains "$backup_identity_output" "original backup identity changed after apply; refusing to restore it"
+assert_contains "$backup_identity_output" "original backup persistent identity changed after apply; refusing to restore it"
 assert_file_exists "$backup_identity_target_path"
 assert_file_exists "$backup_identity_original_path"
 assert_file_exists "$backup_identity_manifest_path"
+
+legacy_device_change_overrides_root="${scratch_dir}/legacy-device-change-overrides"
+legacy_device_change_state_root="${scratch_dir}/legacy-device-change-state"
+legacy_device_change_target_path="${legacy_device_change_overrides_root}/DisplayVendorID-51/DisplayProductID-52"
+legacy_device_change_state_dir="${legacy_device_change_state_root}/DisplayVendorID-51/DisplayProductID-52"
+legacy_device_change_original_path="${legacy_device_change_state_dir}/original.plist"
+legacy_device_change_manifest_path="${legacy_device_change_state_dir}/manifest.plist"
+/bin/mkdir -p "$(/usr/bin/dirname "$legacy_device_change_target_path")" || fail "could not prepare legacy device-change fixture"
+/bin/cp "${fixture_dir}/overrides/DisplayVendorID-30ae/DisplayProductID-62a5-rich" "$legacy_device_change_target_path" || fail "could not create legacy device-change target"
+/usr/bin/plutil -replace DisplayVendorID -integer 81 "$legacy_device_change_target_path" || fail "could not set legacy device-change vendor id"
+/usr/bin/plutil -replace DisplayProductID -integer 82 "$legacy_device_change_target_path" || fail "could not set legacy device-change product id"
+/bin/cp "$legacy_device_change_target_path" "${scratch_dir}/legacy-device-change-original.plist" || fail "could not preserve legacy device-change original"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 51 \
+    --product-id 52 \
+    --native-resolution 1920x1080 \
+    --overrides-root "$legacy_device_change_overrides_root" \
+    --state-root "$legacy_device_change_state_root" \
+    --confirm || fail "apply for legacy device-change recovery should succeed"
+/usr/bin/plutil -replace manifest-version -integer 4 "$legacy_device_change_manifest_path" || fail "could not set the legacy manifest version"
+remove_v5_manifest_fields "$legacy_device_change_manifest_path" || fail "could not remove v5 fields from the legacy manifest fixture"
+/usr/bin/plutil -replace candidate-file-identity -string "$(file_identity_with_changed_device "$(file_identity "$legacy_device_change_target_path")")" "$legacy_device_change_manifest_path" || fail "could not simulate a changed legacy candidate device id"
+/usr/bin/plutil -replace original-file-identity -string "$(file_identity_with_changed_device "$(file_identity "$legacy_device_change_original_path")")" "$legacy_device_change_manifest_path" || fail "could not simulate a changed legacy original device id"
+legacy_device_change_default_output=""
+if legacy_device_change_default_output="$("${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 51 \
+    --product-id 52 \
+    --overrides-root "$legacy_device_change_overrides_root" \
+    --state-root "$legacy_device_change_state_root" \
+    --confirm 2>&1)"; then
+    fail "regular revert must require an explicit v4 migration"
+fi
+assert_contains "$legacy_device_change_default_output" "legacy manifest requires --migrate-v4"
+assert_file_exists "$legacy_device_change_target_path"
+assert_file_exists "$legacy_device_change_original_path"
+assert_file_exists "$legacy_device_change_manifest_path"
+"${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 51 \
+    --product-id 52 \
+    --overrides-root "$legacy_device_change_overrides_root" \
+    --state-root "$legacy_device_change_state_root" \
+    --migrate-v4 \
+    --confirm || fail "revert must accept a legacy manifest after only its device number changes"
+/usr/bin/cmp -s "${scratch_dir}/legacy-device-change-original.plist" "$legacy_device_change_target_path" || fail "legacy device-change recovery must restore the exact original override"
+assert_file_absent "$legacy_device_change_original_path"
+assert_file_absent "$legacy_device_change_manifest_path"
+
+legacy_missing_target_overrides_root="${scratch_dir}/legacy-missing-target-overrides"
+legacy_missing_target_state_root="${scratch_dir}/legacy-missing-target-state"
+legacy_missing_target_path="${legacy_missing_target_overrides_root}/DisplayVendorID-57/DisplayProductID-58"
+legacy_missing_target_state_dir="${legacy_missing_target_state_root}/DisplayVendorID-57/DisplayProductID-58"
+legacy_missing_target_manifest_path="${legacy_missing_target_state_dir}/manifest.plist"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 57 \
+    --product-id 58 \
+    --native-resolution 1920x1080 \
+    --overrides-root "$legacy_missing_target_overrides_root" \
+    --state-root "$legacy_missing_target_state_root" \
+    --confirm || fail "apply for incomplete legacy migration protection should succeed"
+/usr/bin/plutil -replace manifest-version -integer 4 "$legacy_missing_target_manifest_path" || fail "could not set the incomplete legacy manifest version"
+remove_v5_manifest_fields "$legacy_missing_target_manifest_path" || fail "could not remove v5 fields from the incomplete legacy manifest fixture"
+/bin/rm -f "$legacy_missing_target_path"
+legacy_missing_target_output=""
+if legacy_missing_target_output="$("${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 57 \
+    --product-id 58 \
+    --overrides-root "$legacy_missing_target_overrides_root" \
+    --state-root "$legacy_missing_target_state_root" \
+    --migrate-v4 \
+    --confirm 2>&1)"; then
+    fail "legacy migration must reject a missing target"
+fi
+assert_contains "$legacy_missing_target_output" "legacy manifest target is missing; refusing to migrate incomplete state automatically"
+assert_file_absent "$legacy_missing_target_path"
+assert_file_exists "$legacy_missing_target_manifest_path"
+assert_file_absent "${legacy_missing_target_state_dir}/original.plist"
+assert_plist_value "$legacy_missing_target_manifest_path" manifest-version 4
+
+legacy_inode_change_overrides_root="${scratch_dir}/legacy-inode-change-overrides"
+legacy_inode_change_state_root="${scratch_dir}/legacy-inode-change-state"
+legacy_inode_change_target_path="${legacy_inode_change_overrides_root}/DisplayVendorID-59/DisplayProductID-5a"
+legacy_inode_change_state_dir="${legacy_inode_change_state_root}/DisplayVendorID-59/DisplayProductID-5a"
+legacy_inode_change_original_path="${legacy_inode_change_state_dir}/original.plist"
+legacy_inode_change_manifest_path="${legacy_inode_change_state_dir}/manifest.plist"
+/bin/mkdir -p "$(/usr/bin/dirname "$legacy_inode_change_target_path")" || fail "could not prepare legacy inode-change fixture"
+/bin/cp "${fixture_dir}/overrides/DisplayVendorID-30ae/DisplayProductID-62a5-rich" "$legacy_inode_change_target_path" || fail "could not create legacy inode-change target"
+/usr/bin/plutil -replace DisplayVendorID -integer 89 "$legacy_inode_change_target_path" || fail "could not set legacy inode-change vendor id"
+/usr/bin/plutil -replace DisplayProductID -integer 90 "$legacy_inode_change_target_path" || fail "could not set legacy inode-change product id"
+/bin/cp "$legacy_inode_change_target_path" "${scratch_dir}/legacy-inode-change-original.plist" || fail "could not preserve legacy inode-change original"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 59 \
+    --product-id 5a \
+    --native-resolution 1920x1080 \
+    --overrides-root "$legacy_inode_change_overrides_root" \
+    --state-root "$legacy_inode_change_state_root" \
+    --confirm || fail "apply for legacy inode-change protection should succeed"
+/usr/bin/plutil -replace manifest-version -integer 4 "$legacy_inode_change_manifest_path" || fail "could not set the inode-change manifest version"
+remove_v5_manifest_fields "$legacy_inode_change_manifest_path" || fail "could not remove v5 fields from the inode-change manifest fixture"
+legacy_inode_change_original_target_identity="$(file_identity "$legacy_inode_change_target_path")"
+/bin/cp "$legacy_inode_change_target_path" "${legacy_inode_change_target_path}.replacement" || fail "could not create a same-content legacy target replacement"
+/bin/mv "${legacy_inode_change_target_path}.replacement" "$legacy_inode_change_target_path" || fail "could not replace the legacy target with same content"
+[[ "$(file_identity "$legacy_inode_change_target_path")" != "$legacy_inode_change_original_target_identity" ]] || fail "legacy inode-change fixture must replace the target inode"
+legacy_inode_change_output=""
+if legacy_inode_change_output="$("${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 59 \
+    --product-id 5a \
+    --overrides-root "$legacy_inode_change_overrides_root" \
+    --state-root "$legacy_inode_change_state_root" \
+    --migrate-v4 \
+    --confirm 2>&1)"; then
+    fail "legacy migration must reject a same-content target with a different inode"
+fi
+assert_contains "$legacy_inode_change_output" "legacy target override inode changed after apply; refusing to overwrite it"
+assert_file_exists "$legacy_inode_change_target_path"
+assert_file_exists "$legacy_inode_change_original_path"
+assert_file_exists "$legacy_inode_change_manifest_path"
+assert_plist_value "$legacy_inode_change_manifest_path" manifest-version 4
+
+legacy_migration_failure_overrides_root="${scratch_dir}/legacy-migration-failure-overrides"
+legacy_migration_failure_state_root="${scratch_dir}/legacy-migration-failure-state"
+legacy_migration_failure_target_path="${legacy_migration_failure_overrides_root}/DisplayVendorID-5b/DisplayProductID-5c"
+legacy_migration_failure_state_dir="${legacy_migration_failure_state_root}/DisplayVendorID-5b/DisplayProductID-5c"
+legacy_migration_failure_original_path="${legacy_migration_failure_state_dir}/original.plist"
+legacy_migration_failure_manifest_path="${legacy_migration_failure_state_dir}/manifest.plist"
+/bin/mkdir -p "$(/usr/bin/dirname "$legacy_migration_failure_target_path")" || fail "could not prepare legacy migration-failure fixture"
+/bin/cp "${fixture_dir}/overrides/DisplayVendorID-30ae/DisplayProductID-62a5-rich" "$legacy_migration_failure_target_path" || fail "could not create legacy migration-failure target"
+/usr/bin/plutil -replace DisplayVendorID -integer 91 "$legacy_migration_failure_target_path" || fail "could not set legacy migration-failure vendor id"
+/usr/bin/plutil -replace DisplayProductID -integer 92 "$legacy_migration_failure_target_path" || fail "could not set legacy migration-failure product id"
+/bin/cp "$legacy_migration_failure_target_path" "${scratch_dir}/legacy-migration-failure-original.plist" || fail "could not preserve legacy migration-failure original"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 5b \
+    --product-id 5c \
+    --native-resolution 1920x1080 \
+    --overrides-root "$legacy_migration_failure_overrides_root" \
+    --state-root "$legacy_migration_failure_state_root" \
+    --confirm || fail "apply for legacy migration-failure protection should succeed"
+/usr/bin/plutil -replace manifest-version -integer 4 "$legacy_migration_failure_manifest_path" || fail "could not set the migration-failure manifest version"
+remove_v5_manifest_fields "$legacy_migration_failure_manifest_path" || fail "could not remove v5 fields from the migration-failure manifest fixture"
+legacy_migration_failure_candidate_hash="$(sha256_file "$legacy_migration_failure_target_path")"
+legacy_migration_failure_output=""
+if legacy_migration_failure_output="$(/bin/bash -c '
+    source "$1" >/dev/null
+    target_path="$2"
+    eval "$(declare -f replace_file_without_following_directory_link_persistent | /usr/bin/sed '\''s/^replace_file_without_following_directory_link_persistent/original_replace_file_without_following_directory_link_persistent/'\'')"
+    replace_file_without_following_directory_link_persistent() {
+        if [[ "$2" == "$target_path" ]]; then
+            return 1
+        fi
+        original_replace_file_without_following_directory_link_persistent "$@"
+    }
+    revert_override 5b 5c "$3" "$4" true true
+' bash "${repo_dir}/intel-hidpi.sh" "$legacy_migration_failure_target_path" "$legacy_migration_failure_overrides_root" "$legacy_migration_failure_state_root" 2>&1)"; then
+    fail "legacy migration must retain v5 state when the following restore fails"
+fi
+assert_contains "$legacy_migration_failure_output" "could not atomically restore original override"
+assert_file_exists "$legacy_migration_failure_target_path"
+assert_file_exists "$legacy_migration_failure_original_path"
+assert_file_exists "$legacy_migration_failure_manifest_path"
+[[ "$(sha256_file "$legacy_migration_failure_target_path")" == "$legacy_migration_failure_candidate_hash" ]] || fail "failed legacy restore must retain the applied target"
+/usr/bin/cmp -s "${scratch_dir}/legacy-migration-failure-original.plist" "$legacy_migration_failure_original_path" || fail "failed legacy restore must retain the exact original backup"
+assert_plist_value "$legacy_migration_failure_manifest_path" manifest-version 5
+assert_plist_value "$legacy_migration_failure_manifest_path" commit-state committed
+assert_plist_value "$legacy_migration_failure_manifest_path" candidate-persistent-identity "$(persistent_file_identity "$legacy_migration_failure_target_path")"
+assert_plist_value "$legacy_migration_failure_manifest_path" original-persistent-identity "$(persistent_file_identity "$legacy_migration_failure_original_path")"
+
+v5_boot_change_overrides_root="${scratch_dir}/v5-boot-change-overrides"
+v5_boot_change_state_root="${scratch_dir}/v5-boot-change-state"
+v5_boot_change_target_path="${v5_boot_change_overrides_root}/DisplayVendorID-53/DisplayProductID-54"
+v5_boot_change_state_dir="${v5_boot_change_state_root}/DisplayVendorID-53/DisplayProductID-54"
+v5_boot_change_original_path="${v5_boot_change_state_dir}/original.plist"
+v5_boot_change_manifest_path="${v5_boot_change_state_dir}/manifest.plist"
+/bin/mkdir -p "$(/usr/bin/dirname "$v5_boot_change_target_path")" || fail "could not prepare v5 boot-change fixture"
+/bin/cp "${fixture_dir}/overrides/DisplayVendorID-30ae/DisplayProductID-62a5-rich" "$v5_boot_change_target_path" || fail "could not create v5 boot-change target"
+/usr/bin/plutil -replace DisplayVendorID -integer 83 "$v5_boot_change_target_path" || fail "could not set v5 boot-change vendor id"
+/usr/bin/plutil -replace DisplayProductID -integer 84 "$v5_boot_change_target_path" || fail "could not set v5 boot-change product id"
+/bin/cp "$v5_boot_change_target_path" "${scratch_dir}/v5-boot-change-original.plist" || fail "could not preserve v5 boot-change original"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 53 \
+    --product-id 54 \
+    --native-resolution 1920x1080 \
+    --overrides-root "$v5_boot_change_overrides_root" \
+    --state-root "$v5_boot_change_state_root" \
+    --confirm || fail "apply for v5 boot-change recovery should succeed"
+/usr/bin/plutil -replace boot-session -string 0:0 "$v5_boot_change_manifest_path" || fail "could not simulate a later boot session"
+/usr/bin/plutil -replace candidate-file-identity -string "$(file_identity_with_changed_device "$(file_identity "$v5_boot_change_target_path")")" "$v5_boot_change_manifest_path" || fail "could not simulate a changed v5 candidate device id"
+/usr/bin/plutil -replace original-file-identity -string "$(file_identity_with_changed_device "$(file_identity "$v5_boot_change_original_path")")" "$v5_boot_change_manifest_path" || fail "could not simulate a changed v5 original device id"
+"${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 53 \
+    --product-id 54 \
+    --overrides-root "$v5_boot_change_overrides_root" \
+    --state-root "$v5_boot_change_state_root" \
+    --confirm || fail "v5 revert must accept a stable identity after the boot session changes"
+/usr/bin/cmp -s "${scratch_dir}/v5-boot-change-original.plist" "$v5_boot_change_target_path" || fail "v5 boot-change recovery must restore the exact original override"
+assert_file_absent "$v5_boot_change_original_path"
+assert_file_absent "$v5_boot_change_manifest_path"
+
+v5_boot_replacement_overrides_root="${scratch_dir}/v5-boot-replacement-overrides"
+v5_boot_replacement_state_root="${scratch_dir}/v5-boot-replacement-state"
+v5_boot_replacement_target_path="${v5_boot_replacement_overrides_root}/DisplayVendorID-55/DisplayProductID-56"
+v5_boot_replacement_state_dir="${v5_boot_replacement_state_root}/DisplayVendorID-55/DisplayProductID-56"
+v5_boot_replacement_original_path="${v5_boot_replacement_state_dir}/original.plist"
+v5_boot_replacement_manifest_path="${v5_boot_replacement_state_dir}/manifest.plist"
+/bin/mkdir -p "$(/usr/bin/dirname "$v5_boot_replacement_target_path")" || fail "could not prepare v5 boot-replacement fixture"
+/bin/cp "${fixture_dir}/overrides/DisplayVendorID-30ae/DisplayProductID-62a5-rich" "$v5_boot_replacement_target_path" || fail "could not create v5 boot-replacement target"
+/usr/bin/plutil -replace DisplayVendorID -integer 85 "$v5_boot_replacement_target_path" || fail "could not set v5 boot-replacement vendor id"
+/usr/bin/plutil -replace DisplayProductID -integer 86 "$v5_boot_replacement_target_path" || fail "could not set v5 boot-replacement product id"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 55 \
+    --product-id 56 \
+    --native-resolution 1920x1080 \
+    --overrides-root "$v5_boot_replacement_overrides_root" \
+    --state-root "$v5_boot_replacement_state_root" \
+    --confirm || fail "apply for v5 boot-replacement protection should succeed"
+/usr/bin/plutil -replace boot-session -string 0:0 "$v5_boot_replacement_manifest_path" || fail "could not simulate a later boot session for the replacement fixture"
+/bin/cp "$v5_boot_replacement_target_path" "${v5_boot_replacement_target_path}.replacement" || fail "could not create a same-content v5 target replacement"
+/bin/mv "${v5_boot_replacement_target_path}.replacement" "$v5_boot_replacement_target_path" || fail "could not replace the v5 target with same content"
+v5_boot_replacement_output=""
+if v5_boot_replacement_output="$("${repo_dir}/intel-hidpi.sh" revert \
+    --vendor-id 55 \
+    --product-id 56 \
+    --overrides-root "$v5_boot_replacement_overrides_root" \
+    --state-root "$v5_boot_replacement_state_root" \
+    --confirm 2>&1)"; then
+    fail "v5 revert must reject a same-content target replacement after a boot session change"
+fi
+assert_contains "$v5_boot_replacement_output" "target override persistent identity changed after apply; refusing to overwrite it"
+assert_file_exists "$v5_boot_replacement_target_path"
+assert_file_exists "$v5_boot_replacement_original_path"
+assert_file_exists "$v5_boot_replacement_manifest_path"
 
 target_identity_overrides_root="${scratch_dir}/target-identity-overrides"
 target_identity_state_root="${scratch_dir}/target-identity-state"
@@ -340,7 +607,7 @@ if target_identity_output="$("${repo_dir}/intel-hidpi.sh" revert \
     --confirm 2>&1)"; then
     fail "revert must reject a same-content target with a different identity"
 fi
-assert_contains "$target_identity_output" "target override identity changed after apply; refusing to overwrite it"
+assert_contains "$target_identity_output" "target override persistent identity changed after apply; refusing to overwrite it"
 assert_file_exists "$target_identity_target_path"
 assert_file_exists "$target_identity_manifest_path"
 
@@ -395,12 +662,12 @@ competing_target_output=""
 if competing_target_output="$(/bin/bash -c '
     source "$1"
     race_target="$2"
-    eval "$(declare -f darwin_install_file_without_replacement | /usr/bin/sed '"'"'s/^darwin_install_file_without_replacement/original_darwin_install_file_without_replacement/'"'"')"
-    darwin_install_file_without_replacement() {
+    eval "$(declare -f darwin_install_file_without_replacement_persistent | /usr/bin/sed '"'"'s/^darwin_install_file_without_replacement_persistent/original_darwin_install_file_without_replacement_persistent/'"'"')"
+    darwin_install_file_without_replacement_persistent() {
         if [[ "$2" == "$race_target" ]]; then
             printf "competing target\\n" > "$2"
         fi
-        original_darwin_install_file_without_replacement "$@"
+        original_darwin_install_file_without_replacement_persistent "$@"
     }
     candidate_hash="$(sha256_file "$3")"
     manifest_hash="$(sha256_file "$5")"
@@ -453,7 +720,7 @@ if existing_commit_output="$(/bin/bash -c '
     original_identity="$(darwin_file_identity "$2")"
     candidate_identity="$(darwin_file_identity "$3")"
     manifest_identity="$(darwin_file_identity "$7")"
-    commit_apply_state "$2" "$3" true "$4" "$5" "$6" "$7" "$8" "$candidate_hash" "$manifest_hash" "$original_identity" "$candidate_identity" "$manifest_identity"
+    commit_apply_state "$2" "$3" true "$4" "$5" "$6" "$7" "$8" "$candidate_hash" "$manifest_hash" "$original_identity" "$candidate_identity" "$manifest_identity" "$(darwin_file_persistent_identity "$2")"
 ' bash "${repo_dir}/lib/intel_hidpi_storage.sh" \
     "$existing_commit_target_path" "$existing_commit_candidate_path" "$(sha256_file "$existing_commit_target_path")" \
     "$existing_commit_backup_candidate_path" "$existing_commit_original_path" "$existing_commit_manifest_candidate_path" \

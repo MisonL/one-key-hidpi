@@ -18,7 +18,7 @@ Usage:
   intel-hidpi.sh native-resolution --edid HEX
   intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS]
   intel-hidpi.sh apply --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--overrides-root PATH] [--state-root PATH] --confirm
-  intel-hidpi.sh revert --vendor-id HEX --product-id HEX [--overrides-root PATH] [--state-root PATH] --confirm
+  intel-hidpi.sh revert --vendor-id HEX --product-id HEX [--overrides-root PATH] [--state-root PATH] [--migrate-v4] --confirm
 
 Commands:
   inventory  Read connected Intel-compatible external display metadata and
@@ -27,6 +27,7 @@ Commands:
   preview    Generate candidate 2x HiDPI modes without writing an override.
   apply      Merge generated modes into one target override after confirmation.
   revert     Restore or remove only the target override recorded by apply.
+             Legacy v4 state requires the explicit --migrate-v4 acknowledgment.
 EOF
 }
 
@@ -511,6 +512,7 @@ run_revert_command() {
     local overrides_root="$DEFAULT_OVERRIDES_ROOT"
     local state_root="$DEFAULT_STATE_ROOT"
     local confirmed=false
+    local migrate_v4=false
 
     while (($# > 0)); do
         case "$1" in
@@ -538,6 +540,10 @@ run_revert_command() {
             confirmed=true
             shift
             ;;
+        --migrate-v4)
+            migrate_v4=true
+            shift
+            ;;
         *)
             fail "unknown revert option: $1"
             ;;
@@ -545,7 +551,7 @@ run_revert_command() {
     done
 
     [[ -n "$vendor_id" && -n "$product_id" ]] || fail "revert requires vendor id and product id"
-    revert_override "$vendor_id" "$product_id" "$overrides_root" "$state_root" "$confirmed"
+    revert_override "$vendor_id" "$product_id" "$overrides_root" "$state_root" "$confirmed" "$migrate_v4"
 }
 
 main() {

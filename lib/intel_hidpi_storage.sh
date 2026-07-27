@@ -17,6 +17,7 @@ commit_apply_state() {
     local original_identity="${11:-}"
     local candidate_identity="${12:-}"
     local manifest_candidate_identity="${13:-}"
+    local original_persistent_identity="${14:-}"
     local backup_expected_hash=""
     local backup_candidate_identity=""
     local backup_candidate_snapshot
@@ -24,12 +25,14 @@ commit_apply_state() {
     local installed_backup_snapshot
     local installed_backup_hash
     local installed_backup_identity
+    local installed_backup_persistent_identity
     local installed_manifest_snapshot
     local installed_manifest_hash
     local installed_manifest_identity
     local installed_target_snapshot
     local installed_target_hash
     local installed_target_identity
+    local installed_target_persistent_identity
     local target_install_status=0
 
     [[ "$target_existed" == true || "$target_existed" == false ]] || return 1
@@ -48,6 +51,7 @@ commit_apply_state() {
     if [[ "$target_existed" == true ]]; then
         valid_sha256 "$original_hash" || return 1
         valid_file_identity "$original_identity" || return 1
+        valid_persistent_file_identity "$original_persistent_identity" || return 1
         backup_expected_hash="$original_hash"
         backup_candidate_snapshot="$(darwin_file_snapshot "$backup_candidate_path")" || return 1
         IFS='|' read -r backup_candidate_hash backup_candidate_identity <<< "$backup_candidate_snapshot"
@@ -57,25 +61,26 @@ commit_apply_state() {
             printf 'error: original backup candidate changed before state commit; no override was written\n' >&2
             return 1
         }
-        target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity" || {
+        target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity" "$original_persistent_identity" || {
             printf 'error: target changed after validation; no override was written and state was retained for manual inspection\n' >&2
             return 1
         }
     else
-        target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity" || {
+        target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity" "$original_persistent_identity" || {
             printf 'error: target changed after validation; no override was written and state was retained for manual inspection\n' >&2
             return 1
         }
     fi
     if [[ "$target_existed" == true ]]; then
-        if ! installed_backup_snapshot="$(install_file_without_replacement "$backup_candidate_path" "$original_path" "$backup_expected_hash" "$backup_candidate_identity")"; then
+        if ! installed_backup_snapshot="$(install_file_without_replacement_persistent "$backup_candidate_path" "$original_path" "$backup_expected_hash" "$backup_candidate_identity")"; then
             printf 'error: could not store exact original backup without replacement\n' >&2
             return 1
         fi
-        IFS='|' read -r installed_backup_hash installed_backup_identity <<< "$installed_backup_snapshot"
+        IFS='|' read -r installed_backup_hash installed_backup_identity installed_backup_persistent_identity <<< "$installed_backup_snapshot"
         [[ "$installed_backup_hash" == "$backup_expected_hash" ]] || return 1
         valid_file_identity "$installed_backup_identity" || return 1
-        file_matches_snapshot "$original_path" "$backup_expected_hash" "$installed_backup_identity" || return 1
+        valid_persistent_file_identity "$installed_backup_persistent_identity" || return 1
+        file_matches_persistent_snapshot "$original_path" "$backup_expected_hash" "$installed_backup_identity" "$installed_backup_persistent_identity" || return 1
     fi
     if ! installed_manifest_snapshot="$(install_file_without_replacement "$manifest_candidate_path" "$manifest_path" "$manifest_candidate_hash" "$manifest_candidate_identity")"; then
         printf 'error: could not install verified manifest without replacement; state was retained for manual inspection\n' >&2
@@ -85,23 +90,23 @@ commit_apply_state() {
     [[ "$installed_manifest_hash" == "$manifest_candidate_hash" ]] || return 1
     valid_file_identity "$installed_manifest_identity" || return 1
     if [[ "$target_existed" == true ]]; then
-        record_pending_manifest_original_identity "$manifest_path" "$installed_manifest_hash" "$installed_manifest_identity" "$installed_backup_identity" || {
+        record_pending_manifest_original_identity "$manifest_path" "$installed_manifest_hash" "$installed_manifest_identity" "$installed_backup_identity" "$installed_backup_persistent_identity" || {
             printf 'error: original backup was stored but manifest identity could not be committed; state was retained for manual inspection\n' >&2
             return 1
         }
         installed_manifest_hash="$PLIST_OPERATION_HASH"
         installed_manifest_identity="$PLIST_OPERATION_IDENTITY"
-        file_matches_snapshot "$original_path" "$backup_expected_hash" "$installed_backup_identity" || {
+        file_matches_persistent_snapshot "$original_path" "$backup_expected_hash" "$installed_backup_identity" "$installed_backup_persistent_identity" || {
             printf 'error: original backup changed before target commit; state was retained for manual inspection\n' >&2
             return 1
         }
     fi
-    if ! target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity"; then
+    if ! target_matches_pre_apply_state "$target_path" "$target_existed" "$original_hash" "$original_identity" "$original_persistent_identity"; then
         printf 'error: target changed after validation; no override was written and state was retained for manual inspection\n' >&2
         return 1
     fi
     if [[ "$target_existed" == false ]]; then
-        installed_target_snapshot="$(install_file_without_replacement "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity")"
+        installed_target_snapshot="$(install_file_without_replacement_persistent "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity")"
         target_install_status=$?
         if ((target_install_status != 0)); then
             if ((target_install_status == 2)); then
@@ -112,7 +117,7 @@ commit_apply_state() {
             return 1
         fi
     else
-        installed_target_snapshot="$(replace_file_without_following_directory_link "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity" "$original_hash" "$original_identity")"
+        installed_target_snapshot="$(replace_file_without_following_directory_link_persistent "$candidate_path" "$target_path" "$candidate_hash" "$candidate_identity" "$original_hash" "$original_identity" "$original_persistent_identity")"
         target_install_status=$?
         if ((target_install_status != 0)); then
             if ((target_install_status == 2)); then
@@ -123,18 +128,19 @@ commit_apply_state() {
             return 1
         fi
     fi
-    IFS='|' read -r installed_target_hash installed_target_identity <<< "$installed_target_snapshot"
+    IFS='|' read -r installed_target_hash installed_target_identity installed_target_persistent_identity <<< "$installed_target_snapshot"
     [[ "$installed_target_hash" == "$candidate_hash" ]] || return 1
     valid_file_identity "$installed_target_identity" || return 1
-    file_matches_snapshot "$target_path" "$candidate_hash" "$installed_target_identity" || {
+    valid_persistent_file_identity "$installed_target_persistent_identity" || return 1
+    file_matches_persistent_snapshot "$target_path" "$candidate_hash" "$installed_target_identity" "$installed_target_persistent_identity" || {
         printf 'error: target changed immediately after installation; state was retained for manual inspection\n' >&2
         return 1
     }
-    finalize_pending_manifest "$manifest_path" "$installed_manifest_hash" "$installed_manifest_identity" "$installed_target_identity" || {
+    finalize_pending_manifest "$manifest_path" "$installed_manifest_hash" "$installed_manifest_identity" "$installed_target_identity" "$installed_target_persistent_identity" || {
         printf 'error: target was installed but manifest identity could not be committed; state was retained for manual inspection\n' >&2
         return 1
     }
-    file_matches_snapshot "$target_path" "$candidate_hash" "$installed_target_identity" || {
+    file_matches_persistent_snapshot "$target_path" "$candidate_hash" "$installed_target_identity" "$installed_target_persistent_identity" || {
         printf 'error: target changed while finalizing manifest; state was retained for manual inspection\n' >&2
         return 1
     }
@@ -162,6 +168,7 @@ apply_override() {
     local target_existed=false
     local original_hash=""
     local original_identity=""
+    local original_persistent_identity=""
     local original_snapshot
     local candidate_hash
     local candidate_identity
@@ -213,12 +220,13 @@ apply_override() {
         target_existed=true
         create_temporary_file "original.plist" || fail "could not create original backup candidate"
         backup_candidate_path="$TEMPORARY_FILE"
-        original_snapshot="$(darwin_file_snapshot "$target_path")" || fail "could not snapshot original override"
-        IFS='|' read -r original_hash original_identity <<< "$original_snapshot"
+        original_snapshot="$(darwin_file_persistent_snapshot "$target_path")" || fail "could not snapshot original override"
+        IFS='|' read -r original_hash original_identity original_persistent_identity <<< "$original_snapshot"
         valid_sha256 "$original_hash" || fail "could not snapshot original override"
         valid_file_identity "$original_identity" || fail "could not identify original override"
-        copy_file_and_verify_hash "$target_path" "$backup_candidate_path" "$original_hash" "$original_identity" || fail "could not create exact original backup"
-        copy_file_and_verify_hash "$target_path" "$candidate_path" "$original_hash" "$original_identity" || fail "could not create candidate override"
+        valid_persistent_file_identity "$original_persistent_identity" || fail "could not identify original override"
+        copy_file_and_verify_hash "$target_path" "$backup_candidate_path" "$original_hash" "$original_identity" "$original_persistent_identity" || fail "could not create exact original backup"
+        copy_file_and_verify_hash "$target_path" "$candidate_path" "$original_hash" "$original_identity" "$original_persistent_identity" || fail "could not create candidate override"
     elif [[ -e "$target_path" || -L "$target_path" ]]; then
         fail "target override exists but is not a regular file"
     else
@@ -251,7 +259,7 @@ apply_override() {
     manifest_candidate_hash="$PLIST_OPERATION_HASH"
     manifest_candidate_identity="$PLIST_OPERATION_IDENTITY"
     record_temporary_file_snapshot "$manifest_candidate_path" "$manifest_candidate_hash" "$manifest_candidate_identity" || fail "could not verify manifest candidate"
-    commit_apply_state "$target_path" "$candidate_path" "$target_existed" "$original_hash" "$backup_candidate_path" "$original_path" "$manifest_candidate_path" "$manifest_path" "$candidate_hash" "$manifest_candidate_hash" "$original_identity" "$candidate_identity" "$manifest_candidate_identity" || fail "apply did not complete; recovery state was retained for manual inspection"
+    commit_apply_state "$target_path" "$candidate_path" "$target_existed" "$original_hash" "$backup_candidate_path" "$original_path" "$manifest_candidate_path" "$manifest_path" "$candidate_hash" "$manifest_candidate_hash" "$original_identity" "$candidate_identity" "$manifest_candidate_identity" "$original_persistent_identity" || fail "apply did not complete; recovery state was retained for manual inspection"
     complete_operation_cleanup || fail "apply committed but temporary artifact or operation lock cleanup failed"
 
     printf 'applied=%s\n' "$target_relative"
@@ -264,6 +272,7 @@ revert_override() {
     local overrides_root="$3"
     local state_root="$4"
     local confirmed="$5"
+    local migrate_v4="${6:-false}"
     local target_path
     local state_dir
     local manifest_path
@@ -271,28 +280,42 @@ revert_override() {
     local target_dir
     local target_relative
     local target_existed
+    local manifest_version
     local manifest_metadata
     local manifest_hash
     local manifest_identity
+    local manifest_persistent_identity
+    local migrated_manifest_snapshot
+    local migrated_manifest_hash
+    local migrated_manifest_identity
     local candidate_hash
     local candidate_identity
+    local candidate_persistent_identity
     local original_hash
     local original_identity
-    local backup_snapshot
+    local original_persistent_identity
+    local manifest_boot_session
+    local current_boot_session_value
+    local backup_persistent_snapshot
     local target_identity
-    local target_snapshot
+    local target_persistent_identity
+    local target_persistent_snapshot
     local target_hash
     local backup_hash
     local backup_identity
+    local backup_persistent_identity
     local restore_candidate_path
     local restore_candidate_identity
     local restored_target_snapshot
     local restored_target_hash
     local restored_target_identity
+    local restored_target_persistent_identity
     local restore_status=0
+    local migration_status=0
     local target_present=false
 
     [[ "$confirmed" == true ]] || fail "revert requires --confirm"
+    [[ "$migrate_v4" == true || "$migrate_v4" == false ]] || fail "revert migration state is invalid"
     vendor_id="$(normalize_hex_id "$vendor_id")" || fail "vendor id must be hexadecimal"
     product_id="$(normalize_hex_id "$product_id")" || fail "product id must be hexadecimal"
     overrides_root="$(normalize_storage_root "$overrides_root")" || fail "overrides root is invalid or traverses a symbolic link"
@@ -343,19 +366,27 @@ revert_override() {
             ;;
         esac
     fi
-    IFS='|' read -r target_existed candidate_hash candidate_identity original_hash original_identity manifest_hash manifest_identity <<< "$manifest_metadata"
+    IFS='|' read -r manifest_version target_existed candidate_hash candidate_identity candidate_persistent_identity original_hash original_identity original_persistent_identity manifest_boot_session manifest_hash manifest_identity manifest_persistent_identity <<< "$manifest_metadata"
+    valid_persistent_file_identity "$manifest_persistent_identity" || fail "could not identify manifest safely"
+    if [[ "$manifest_version" == "$LEGACY_MANIFEST_VERSION" && "$migrate_v4" != true ]]; then
+        fail "legacy manifest requires --migrate-v4; refusing to weaken file identity verification automatically"
+    fi
 
     case "$target_existed" in
     true)
         [[ -f "$original_path" && ! -L "$original_path" ]] || fail "original backup is missing"
-        backup_snapshot="$(darwin_file_snapshot "$original_path")" || fail "could not snapshot original backup"
-        IFS='|' read -r backup_hash backup_identity <<< "$backup_snapshot"
+        backup_persistent_snapshot="$(darwin_file_persistent_snapshot "$original_path")" || fail "could not snapshot original backup"
+        IFS='|' read -r backup_hash backup_identity backup_persistent_identity <<< "$backup_persistent_snapshot"
         valid_sha256 "$backup_hash" || fail "could not snapshot original backup"
         valid_file_identity "$backup_identity" || fail "could not snapshot original backup"
         [[ "$backup_hash" == "$original_hash" ]] || fail "original backup changed after apply; refusing to restore it"
-        [[ "$backup_identity" == "$original_identity" ]] || fail "original backup identity changed after apply; refusing to restore it"
+        if [[ "$manifest_version" == "$MANIFEST_VERSION" ]]; then
+            [[ "$backup_persistent_identity" == "$original_persistent_identity" ]] || fail "original backup persistent identity changed after apply; refusing to restore it"
+        else
+            legacy_file_identity_matches_inode "$original_identity" "$backup_identity" || fail "legacy original backup inode changed after apply; refusing to restore it"
+        fi
         plist_file_is_valid "$original_path" "$backup_hash" "$backup_identity" || fail "original backup is invalid or changed after apply; refusing to restore it"
-        file_matches_snapshot "$original_path" "$original_hash" "$original_identity" || fail "original backup changed after apply; refusing to restore it"
+        file_matches_persistent_snapshot "$original_path" "$original_hash" "$backup_identity" "$backup_persistent_identity" || fail "original backup changed after apply; refusing to restore it"
         ;;
     false)
         [[ ! -e "$original_path" && ! -L "$original_path" ]] || fail "unexpected original backup exists for a created target"
@@ -368,25 +399,72 @@ revert_override() {
     if [[ -e "$target_path" || -L "$target_path" ]]; then
         [[ -f "$target_path" && ! -L "$target_path" ]] || fail "target override is not a regular file"
         target_present=true
-        target_snapshot="$(darwin_file_snapshot "$target_path")" || fail "could not snapshot current target override"
-        IFS='|' read -r target_hash target_identity <<< "$target_snapshot"
+        target_persistent_snapshot="$(darwin_file_persistent_snapshot "$target_path")" || fail "could not snapshot current target override"
+        IFS='|' read -r target_hash target_identity target_persistent_identity <<< "$target_persistent_snapshot"
         valid_sha256 "$target_hash" || fail "could not snapshot current target override"
         valid_file_identity "$target_identity" || fail "could not snapshot current target override"
         [[ "$target_hash" == "$candidate_hash" ]] || fail "target override changed after apply; refusing to overwrite it"
-        [[ "$target_identity" == "$candidate_identity" ]] || fail "target override identity changed after apply; refusing to overwrite it"
-        file_matches_snapshot "$target_path" "$candidate_hash" "$candidate_identity" || fail "target override changed after apply; refusing to overwrite it"
+        if [[ "$manifest_version" == "$MANIFEST_VERSION" ]]; then
+            [[ "$target_persistent_identity" == "$candidate_persistent_identity" ]] || fail "target override persistent identity changed after apply; refusing to overwrite it"
+        else
+            legacy_file_identity_matches_inode "$candidate_identity" "$target_identity" || fail "legacy target override inode changed after apply; refusing to overwrite it"
+        fi
+        file_matches_persistent_snapshot "$target_path" "$candidate_hash" "$target_identity" "$target_persistent_identity" || fail "target override changed after apply; refusing to overwrite it"
     fi
-    file_matches_snapshot "$manifest_path" "$manifest_hash" "$manifest_identity" || fail "manifest changed before reverting target; retaining state"
+
+    if [[ "$manifest_version" == "$MANIFEST_VERSION" ]]; then
+        current_boot_session_value="$(current_boot_session)" || fail "could not determine the current boot session"
+        if [[ "$current_boot_session_value" == "$manifest_boot_session" ]]; then
+            if [[ "$target_existed" == true ]]; then
+                [[ "$backup_identity" == "$original_identity" ]] || fail "original backup identity changed within this boot session; refusing to restore it"
+            fi
+            if [[ "$target_present" == true ]]; then
+                [[ "$target_identity" == "$candidate_identity" ]] || fail "target override identity changed within this boot session; refusing to overwrite it"
+            fi
+        fi
+    fi
+
+    if [[ "$manifest_version" == "$LEGACY_MANIFEST_VERSION" ]]; then
+        [[ "$target_present" == true ]] || fail "legacy manifest target is missing; refusing to migrate incomplete state automatically"
+        candidate_identity="$target_identity"
+        candidate_persistent_identity="$target_persistent_identity"
+        if [[ "$target_existed" == true ]]; then
+            original_identity="$backup_identity"
+            original_persistent_identity="$backup_persistent_identity"
+        fi
+        current_boot_session_value="$(current_boot_session)" || fail "could not determine the current boot session"
+        migrate_v4_manifest "$manifest_path" "$manifest_hash" "$manifest_identity" "$target_existed" "$candidate_identity" "$candidate_persistent_identity" "$original_identity" "$original_persistent_identity" "$current_boot_session_value"
+        migration_status=$?
+        if ((migration_status != 0)); then
+            if ((migration_status == 2)); then
+                fail "legacy manifest migration may have replaced state before verification or cleanup failed; retaining state"
+            fi
+            fail "could not atomically migrate the verified legacy manifest; retaining state"
+        fi
+        manifest_hash="$PLIST_OPERATION_HASH"
+        manifest_identity="$PLIST_OPERATION_IDENTITY"
+        valid_sha256 "$manifest_hash" || fail "could not verify migrated legacy manifest"
+        valid_file_identity "$manifest_identity" || fail "could not verify migrated legacy manifest"
+        migrated_manifest_snapshot="$(darwin_file_persistent_snapshot "$manifest_path")" || fail "could not verify migrated legacy manifest"
+        IFS='|' read -r migrated_manifest_hash migrated_manifest_identity manifest_persistent_identity <<< "$migrated_manifest_snapshot"
+        [[ "$migrated_manifest_hash" == "$manifest_hash" && "$migrated_manifest_identity" == "$manifest_identity" ]] || fail "migrated legacy manifest changed before verification"
+        valid_persistent_file_identity "$manifest_persistent_identity" || fail "could not verify migrated legacy manifest"
+        manifest_version="$MANIFEST_VERSION"
+        manifest_boot_session="$current_boot_session_value"
+    fi
+    file_matches_persistent_snapshot "$manifest_path" "$manifest_hash" "$manifest_identity" "$manifest_persistent_identity" || fail "manifest changed before reverting target; retaining state"
 
     if [[ "$target_existed" == true ]]; then
         ensure_directory_path_without_symlinks "$target_dir" || fail "could not prepare target directory safely"
-        create_operation_temporary_directory || fail "could not create private operation directory"
+        if [[ -z "$OPERATION_TEMPORARY_DIRECTORY" ]]; then
+            create_operation_temporary_directory || fail "could not create private operation directory"
+        fi
         create_temporary_file "DisplayProductID-${product_id}.restore" || fail "could not create restore candidate"
         restore_candidate_path="$TEMPORARY_FILE"
-        copy_file_and_verify_hash "$original_path" "$restore_candidate_path" "$original_hash" "$backup_identity" || fail "could not prepare an exact verified restore candidate"
+        copy_file_and_verify_hash "$original_path" "$restore_candidate_path" "$original_hash" "$backup_identity" "$backup_persistent_identity" || fail "could not prepare an exact verified restore candidate"
         restore_candidate_identity="$(temporary_file_expected_identity "$restore_candidate_path")" || fail "could not verify restore candidate"
         if [[ "$target_present" == true ]]; then
-            restored_target_snapshot="$(replace_file_without_following_directory_link "$restore_candidate_path" "$target_path" "$original_hash" "$restore_candidate_identity" "$candidate_hash" "$target_identity")"
+            restored_target_snapshot="$(replace_file_without_following_directory_link_persistent "$restore_candidate_path" "$target_path" "$original_hash" "$restore_candidate_identity" "$candidate_hash" "$target_identity" "$target_persistent_identity")"
             restore_status=$?
             if ((restore_status != 0)); then
                 if ((restore_status == 2)); then
@@ -395,7 +473,7 @@ revert_override() {
                 fail "could not atomically restore original override"
             fi
         else
-            restored_target_snapshot="$(install_file_without_replacement "$restore_candidate_path" "$target_path" "$original_hash" "$restore_candidate_identity")"
+            restored_target_snapshot="$(install_file_without_replacement_persistent "$restore_candidate_path" "$target_path" "$original_hash" "$restore_candidate_identity")"
             restore_status=$?
             if ((restore_status != 0)); then
                 if ((restore_status == 2)); then
@@ -404,13 +482,14 @@ revert_override() {
                 fail "target appeared while restoring the original override"
             fi
         fi
-        IFS='|' read -r restored_target_hash restored_target_identity <<< "$restored_target_snapshot"
+        IFS='|' read -r restored_target_hash restored_target_identity restored_target_persistent_identity <<< "$restored_target_snapshot"
         [[ "$restored_target_hash" == "$original_hash" ]] || fail "restored target does not match the original backup; retaining state"
         valid_file_identity "$restored_target_identity" || fail "could not identify restored target override"
-        file_matches_snapshot "$target_path" "$original_hash" "$restored_target_identity" || fail "restored target changed immediately after installation; retaining state"
+        valid_persistent_file_identity "$restored_target_persistent_identity" || fail "could not identify restored target override"
+        file_matches_persistent_snapshot "$target_path" "$original_hash" "$restored_target_identity" "$restored_target_persistent_identity" || fail "restored target changed immediately after installation; retaining state"
     elif [[ "$target_existed" == false ]]; then
         if [[ "$target_present" == true ]]; then
-            remove_file_if_unchanged "$target_path" "$candidate_hash" "$candidate_identity" || fail "could not remove the unchanged created target override"
+            remove_file_if_unchanged_persistent "$target_path" "$candidate_hash" "$target_identity" "$target_persistent_identity" || fail "could not remove the unchanged created target override"
         fi
         [[ ! -e "$target_path" && ! -L "$target_path" ]] || fail "created target appeared during revert; retaining state"
     fi
@@ -420,15 +499,15 @@ revert_override() {
     fi
 
     if [[ "$target_existed" == true ]]; then
-        file_matches_snapshot "$target_path" "$original_hash" "$restored_target_identity" || fail "restored target changed before state cleanup; retaining state"
-        file_matches_snapshot "$original_path" "$original_hash" "$original_identity" || fail "original backup changed before cleanup; retaining state"
-        remove_file_if_unchanged "$original_path" "$original_hash" "$original_identity" || fail "override was restored but original backup could not be removed"
+        file_matches_persistent_snapshot "$target_path" "$original_hash" "$restored_target_identity" "$restored_target_persistent_identity" || fail "restored target changed before state cleanup; retaining state"
+        file_matches_persistent_snapshot "$original_path" "$original_hash" "$backup_identity" "$backup_persistent_identity" || fail "original backup changed before cleanup; retaining state"
+        remove_file_if_unchanged_persistent "$original_path" "$original_hash" "$backup_identity" "$backup_persistent_identity" || fail "override was restored but original backup could not be removed"
     fi
     if [[ "$target_existed" == false ]]; then
         [[ ! -e "$target_path" && ! -L "$target_path" ]] || fail "created target appeared before state cleanup; retaining state"
     fi
-    file_matches_snapshot "$manifest_path" "$manifest_hash" "$manifest_identity" || fail "manifest changed before state cleanup; retaining state"
-    remove_file_if_unchanged "$manifest_path" "$manifest_hash" "$manifest_identity" || fail "override was reverted but manifest could not be removed"
+    file_matches_persistent_snapshot "$manifest_path" "$manifest_hash" "$manifest_identity" "$manifest_persistent_identity" || fail "manifest changed before state cleanup; retaining state"
+    remove_file_if_unchanged_persistent "$manifest_path" "$manifest_hash" "$manifest_identity" "$manifest_persistent_identity" || fail "override was reverted but manifest could not be removed"
     complete_operation_cleanup || fail "revert committed but temporary artifact or operation lock cleanup failed"
 
     printf 'reverted=%s\n' "$target_relative"

@@ -212,7 +212,9 @@ create_pending_manifest() {
     /usr/bin/plutil -create xml1 "$path" || return 1
     /usr/bin/plutil -insert commit-state -string pending "$path" || return 1
     /usr/bin/plutil -insert candidate-file-identity -string "" "$path" || return 1
-    /usr/bin/plutil -insert original-file-identity -string "" "$path"
+    /usr/bin/plutil -insert original-file-identity -string "" "$path" || return 1
+    /usr/bin/plutil -insert candidate-persistent-identity -string "" "$path" || return 1
+    /usr/bin/plutil -insert original-persistent-identity -string "" "$path"
 }
 
 scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-races.XXXXXX")" || fail "could not create scratch directory"
@@ -438,7 +440,7 @@ if backup_collision_output="$(/bin/bash -c '
     original_identity="$(darwin_file_identity "$2")"
     candidate_identity="$(darwin_file_identity "$3")"
     manifest_identity="$(darwin_file_identity "$7")"
-    commit_apply_state "$2" "$3" true "$4" "$5" "$6" "$7" "$8" "$candidate_hash" "$manifest_hash" "$original_identity" "$candidate_identity" "$manifest_identity"
+    commit_apply_state "$2" "$3" true "$4" "$5" "$6" "$7" "$8" "$candidate_hash" "$manifest_hash" "$original_identity" "$candidate_identity" "$manifest_identity" "$(darwin_file_persistent_identity "$2")"
 ' bash "${repo_dir}/lib/intel_hidpi_storage.sh" \
     "$backup_target_path" "$backup_candidate_path" "$(sha256_file "$backup_target_path")" \
     "$backup_candidate_original_path" "$backup_original_path" "$backup_manifest_candidate_path" "$backup_manifest_path" 2>&1)"; then
@@ -476,7 +478,7 @@ if manifest_hash_output="$(/bin/bash -c '
     original_identity="$(darwin_file_identity "$4")"
     candidate_identity="$(darwin_file_identity "$5")"
     manifest_identity="$(darwin_file_identity "$2")"
-    commit_apply_state "$4" "$5" true "$6" "$7" "$8" "$2" "$9" "${10}" "$3" "$original_identity" "$candidate_identity" "$manifest_identity"
+    commit_apply_state "$4" "$5" true "$6" "$7" "$8" "$2" "$9" "${10}" "$3" "$original_identity" "$candidate_identity" "$manifest_identity" "$(darwin_file_persistent_identity "$4")"
 ' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$manifest_hash_candidate_manifest_path" "$manifest_candidate_hash" \
     "$manifest_hash_target_path" "$manifest_hash_candidate_path" "$(sha256_file "$manifest_hash_target_path")" \
     "$manifest_hash_backup_candidate_path" "$manifest_hash_original_path" "$manifest_hash_path" "$(sha256_file "$manifest_hash_candidate_path")" 2>&1)"; then
@@ -519,7 +521,7 @@ if replace_output="$(/bin/bash -c '
     original_identity="$(darwin_file_identity "$3")"
     candidate_identity="$(darwin_file_identity "$4")"
     manifest_identity="$(darwin_file_identity "$7")"
-    commit_apply_state "$3" "$4" true "$original_hash" "$5" "$6" "$7" "$8" "$candidate_hash" "$manifest_hash" "$original_identity" "$candidate_identity" "$manifest_identity"
+    commit_apply_state "$3" "$4" true "$original_hash" "$5" "$6" "$7" "$8" "$candidate_hash" "$manifest_hash" "$original_identity" "$candidate_identity" "$manifest_identity" "$(darwin_file_persistent_identity "$3")"
 ' bash "${repo_dir}/lib/intel_hidpi_storage.sh" "$replace_outside_dir" \
     "$replace_target_path" "$replace_candidate_path" "$replace_backup_candidate_path" \
     "$replace_original_path" "$replace_manifest_candidate_path" "$replace_manifest_path" 2>&1)"; then
@@ -1177,14 +1179,14 @@ if revert_replace_output="$(/bin/bash -c '
     target_path="$2"
     outside_dir="$3"
     target_replaced=false
-    eval "$(declare -f replace_file_without_following_directory_link | /usr/bin/sed '\''s/^replace_file_without_following_directory_link/original_replace_file_without_following_directory_link/'\'')"
-    replace_file_without_following_directory_link() {
+    eval "$(declare -f replace_file_without_following_directory_link_persistent | /usr/bin/sed '\''s/^replace_file_without_following_directory_link_persistent/original_replace_file_without_following_directory_link_persistent/'\'')"
+    replace_file_without_following_directory_link_persistent() {
         if [[ "$2" == "$target_path" && "$target_replaced" == false ]]; then
             /bin/rm -f "$target_path" || return 1
             /bin/ln -s "$outside_dir" "$target_path" || return 1
             target_replaced=true
         fi
-        original_replace_file_without_following_directory_link "$@"
+        original_replace_file_without_following_directory_link_persistent "$@"
     }
     revert_override 30ae 62a5 "$4" "$5" true
 ' bash "${repo_dir}/intel-hidpi.sh" "$revert_replace_target_path" "$revert_replace_outside_dir" "$revert_replace_overrides_root" "$revert_replace_state_root" 2>&1)"; then
@@ -1216,9 +1218,9 @@ if created_race_output="$(/bin/bash -c '
     target_path="$2"
     original_path="$3"
     injected_original=false
-    eval "$(declare -f remove_file_if_unchanged | /usr/bin/sed '"'"'s/^remove_file_if_unchanged/original_remove_file_if_unchanged/'"'"')"
-    remove_file_if_unchanged() {
-        original_remove_file_if_unchanged "$@" || return 1
+    eval "$(declare -f remove_file_if_unchanged_persistent | /usr/bin/sed '"'"'s/^remove_file_if_unchanged_persistent/original_remove_file_if_unchanged_persistent/'"'"')"
+    remove_file_if_unchanged_persistent() {
+        original_remove_file_if_unchanged_persistent "$@" || return 1
         if [[ "$1" == "$target_path" && "$injected_original" == false ]]; then
             printf "competing original\\n" > "$original_path"
             injected_original=true
@@ -1248,9 +1250,9 @@ created_reappeared_output=""
 if created_reappeared_output="$(/bin/bash -c '
     source "$1"
     target_path="$2"
-    eval "$(declare -f remove_file_if_unchanged | /usr/bin/sed '"'"'s/^remove_file_if_unchanged/original_remove_file_if_unchanged/'"'"')"
-    remove_file_if_unchanged() {
-        original_remove_file_if_unchanged "$@" || return 1
+    eval "$(declare -f remove_file_if_unchanged_persistent | /usr/bin/sed '"'"'s/^remove_file_if_unchanged_persistent/original_remove_file_if_unchanged_persistent/'"'"')"
+    remove_file_if_unchanged_persistent() {
+        original_remove_file_if_unchanged_persistent "$@" || return 1
         if [[ "$1" == "$target_path" ]]; then
             printf "competing target\\n" > "$target_path"
         fi
@@ -1286,12 +1288,12 @@ original_cleanup_output=""
 if original_cleanup_output="$(/bin/bash -c '
     source "$1" >/dev/null
     original_path="$2"
-    eval "$(declare -f remove_file_if_unchanged | /usr/bin/sed '"'"'s/^remove_file_if_unchanged/original_remove_file_if_unchanged/'"'"')"
-    remove_file_if_unchanged() {
+    eval "$(declare -f remove_file_if_unchanged_persistent | /usr/bin/sed '"'"'s/^remove_file_if_unchanged_persistent/original_remove_file_if_unchanged_persistent/'"'"')"
+    remove_file_if_unchanged_persistent() {
         if [[ "$1" == "$original_path" ]]; then
             printf "changed original\\n" > "$original_path"
         fi
-        original_remove_file_if_unchanged "$@"
+        original_remove_file_if_unchanged_persistent "$@"
     }
     revert_override 24 25 "$3" "$4" true
 ' bash "${repo_dir}/intel-hidpi.sh" "$original_cleanup_original_path" "$original_cleanup_overrides_root" "$original_cleanup_state_root" 2>&1)"; then
@@ -1318,9 +1320,9 @@ if manifest_cleanup_output="$(/bin/bash -c '
     source "$1" >/dev/null
     target_path="$2"
     manifest_path="$3"
-    eval "$(declare -f remove_file_if_unchanged | /usr/bin/sed '"'"'s/^remove_file_if_unchanged/original_remove_file_if_unchanged/'"'"')"
-    remove_file_if_unchanged() {
-        original_remove_file_if_unchanged "$@" || return 1
+    eval "$(declare -f remove_file_if_unchanged_persistent | /usr/bin/sed '"'"'s/^remove_file_if_unchanged_persistent/original_remove_file_if_unchanged_persistent/'"'"')"
+    remove_file_if_unchanged_persistent() {
+        original_remove_file_if_unchanged_persistent "$@" || return 1
         if [[ "$1" == "$target_path" ]]; then
             /usr/bin/plutil -replace native-resolution -string 1600x900 "$manifest_path" || return 1
         fi
@@ -1333,5 +1335,73 @@ assert_contains "$manifest_cleanup_output" "manifest changed before state cleanu
 assert_file_absent "$manifest_cleanup_target_path"
 assert_file_exists "$manifest_cleanup_manifest_path"
 [[ "$(/usr/bin/plutil -extract native-resolution raw -o - "$manifest_cleanup_manifest_path")" == "1600x900" ]] || fail "manifest cleanup race must retain the competing manifest"
+
+manifest_persistent_cleanup_overrides_root="${scratch_dir}/manifest-persistent-cleanup-overrides"
+manifest_persistent_cleanup_state_root="${scratch_dir}/manifest-persistent-cleanup-state"
+manifest_persistent_cleanup_target_path="${manifest_persistent_cleanup_overrides_root}/DisplayVendorID-28/DisplayProductID-29"
+manifest_persistent_cleanup_manifest_path="${manifest_persistent_cleanup_state_root}/DisplayVendorID-28/DisplayProductID-29/manifest.plist"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 28 \
+    --product-id 29 \
+    --native-resolution 1920x1080 \
+    --overrides-root "$manifest_persistent_cleanup_overrides_root" \
+    --state-root "$manifest_persistent_cleanup_state_root" \
+    --confirm || fail "apply for manifest persistent cleanup test should succeed"
+manifest_persistent_cleanup_output=""
+if ! manifest_persistent_cleanup_output="$(/bin/bash -c '
+    source "$1" >/dev/null
+    manifest_path="$2"
+    manifest_cleanup_used=false
+    eval "$(declare -f remove_file_if_unchanged_persistent | /usr/bin/sed '\''s/^remove_file_if_unchanged_persistent/original_remove_file_if_unchanged_persistent/'\'')"
+    remove_file_if_unchanged_persistent() {
+        if [[ "$1" == "$manifest_path" ]]; then
+            [[ "$4" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || return 1
+            manifest_cleanup_used=true
+        fi
+        original_remove_file_if_unchanged_persistent "$@"
+    }
+    revert_override 28 29 "$3" "$4" true
+    [[ "$manifest_cleanup_used" == true ]] || exit 1
+    printf "manifest persistent cleanup verified\\n"
+' bash "${repo_dir}/intel-hidpi.sh" "$manifest_persistent_cleanup_manifest_path" "$manifest_persistent_cleanup_overrides_root" "$manifest_persistent_cleanup_state_root" 2>&1)"; then
+    fail "revert must use persistent identity when removing the manifest"
+fi
+assert_contains "$manifest_persistent_cleanup_output" "manifest persistent cleanup verified"
+assert_file_absent "$manifest_persistent_cleanup_target_path"
+assert_file_absent "$manifest_persistent_cleanup_manifest_path"
+
+manifest_replacement_overrides_root="${scratch_dir}/manifest-replacement-overrides"
+manifest_replacement_state_root="${scratch_dir}/manifest-replacement-state"
+manifest_replacement_target_path="${manifest_replacement_overrides_root}/DisplayVendorID-2a/DisplayProductID-2b"
+manifest_replacement_manifest_path="${manifest_replacement_state_root}/DisplayVendorID-2a/DisplayProductID-2b/manifest.plist"
+"${repo_dir}/intel-hidpi.sh" apply \
+    --vendor-id 2a \
+    --product-id 2b \
+    --native-resolution 1920x1080 \
+    --overrides-root "$manifest_replacement_overrides_root" \
+    --state-root "$manifest_replacement_state_root" \
+    --confirm || fail "apply for manifest replacement protection should succeed"
+manifest_replacement_output=""
+if manifest_replacement_output="$(/bin/bash -c '
+    source "$1" >/dev/null
+    target_path="$2"
+    manifest_path="$3"
+    manifest_replaced=false
+    eval "$(declare -f remove_file_if_unchanged_persistent | /usr/bin/sed '\''s/^remove_file_if_unchanged_persistent/original_remove_file_if_unchanged_persistent/'\'')"
+    remove_file_if_unchanged_persistent() {
+        original_remove_file_if_unchanged_persistent "$@" || return 1
+        if [[ "$1" == "$target_path" && "$manifest_replaced" == false ]]; then
+            /bin/cp "$manifest_path" "${manifest_path}.replacement" || return 1
+            /bin/mv "${manifest_path}.replacement" "$manifest_path" || return 1
+            manifest_replaced=true
+        fi
+    }
+    revert_override 2a 2b "$4" "$5" true
+' bash "${repo_dir}/intel-hidpi.sh" "$manifest_replacement_target_path" "$manifest_replacement_manifest_path" "$manifest_replacement_overrides_root" "$manifest_replacement_state_root" 2>&1)"; then
+    fail "revert must reject a same-content manifest replacement before cleanup"
+fi
+assert_contains "$manifest_replacement_output" "manifest changed before state cleanup; retaining state"
+assert_file_absent "$manifest_replacement_target_path"
+assert_file_exists "$manifest_replacement_manifest_path"
 
 printf 'PASS: Intel HiDPI storage races\n'
