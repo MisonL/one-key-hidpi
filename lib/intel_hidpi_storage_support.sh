@@ -323,6 +323,17 @@ is_system_state_root() {
     [[ "$path" == "$DEFAULT_STATE_ROOT" || "$path" == "/System/Volumes/Data${DEFAULT_STATE_ROOT}" ]]
 }
 
+storage_roots_have_matching_trust() {
+    local overrides_root="$1"
+    local state_root="$2"
+    local overrides_are_system=false
+    local state_is_system=false
+
+    is_system_overrides_root "$overrides_root" && overrides_are_system=true
+    is_system_state_root "$state_root" && state_is_system=true
+    [[ "$overrides_are_system" == "$state_is_system" ]]
+}
+
 reset_operation_cleanup_state() {
     TEMPORARY_FILES=("")
     TEMPORARY_FILE_HASHES=("")

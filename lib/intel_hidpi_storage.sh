@@ -175,6 +175,7 @@ apply_override() {
     IFS='|' read -r vendor_id product_id vendor_decimal product_decimal <<< "$apply_request"
     overrides_root="$(normalize_storage_root "$overrides_root")" || fail "overrides root is invalid or traverses a symbolic link"
     state_root="$(normalize_storage_root "$state_root")" || fail "state root is invalid or traverses a symbolic link"
+    storage_roots_have_matching_trust "$overrides_root" "$state_root" || fail "system overrides root and state root must be used together"
     require_root_for_system_paths "$overrides_root" "$state_root"
     is_system_overrides_root "$overrides_root" && overrides_are_system_paths=true
     is_system_state_root "$state_root" && state_is_system_path=true
@@ -296,6 +297,7 @@ revert_override() {
     product_id="$(normalize_hex_id "$product_id")" || fail "product id must be hexadecimal"
     overrides_root="$(normalize_storage_root "$overrides_root")" || fail "overrides root is invalid or traverses a symbolic link"
     state_root="$(normalize_storage_root "$state_root")" || fail "state root is invalid or traverses a symbolic link"
+    storage_roots_have_matching_trust "$overrides_root" "$state_root" || fail "system overrides root and state root must be used together"
     require_root_for_system_paths "$overrides_root" "$state_root"
     target_path="$(path_for_display "$overrides_root" "$vendor_id" "$product_id")"
     target_dir="$(/usr/bin/dirname "$target_path")"
