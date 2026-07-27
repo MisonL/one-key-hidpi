@@ -108,6 +108,7 @@ create_icons_plist_fixture() {
 
 run_direct_disable() {
     local target_dir="$1"
+    local selection="${2:-1}"
 
     /bin/bash -c '
         source "$1" >/dev/null
@@ -115,15 +116,14 @@ run_direct_disable() {
         Vid=30ae
         Pid=62a5
         langDisableOpt1="(1) Disable HIDPI on this monitor"
-        langDisableOpt2="(2) Reset all settings to macOS default"
         langInputChoice="Enter your choice"
         langDisabled="HIDPI Disabled"
         langUnsafeVendorPath="Unsafe vendor path"
         sudo() {
             "$@"
         }
-        printf "1\\n" | disable
-    ' bash "$repo_dir/hidpi.sh" "$target_dir"
+        printf "%s\\n" "$3" | disable
+    ' bash "$repo_dir/hidpi.sh" "$target_dir" "$selection"
 }
 
 generate_restore_script() {
@@ -140,16 +140,35 @@ run_restore_script() {
     local restore_script="$1"
     local run_dir="$2"
     local edid="$3"
+    local selection="${4:-1}"
 
     (
         cd "$run_dir" || exit 1
-        printf "1\n" | /bin/bash -c '
+        printf "%s\n" "$selection" | /bin/bash -c '
             selected_edid="$2"
             ioreg() {
                 printf "    | | \\\"IODisplayEDID\\\" = <%s>\\n" "$selected_edid"
             }
             source "$1"
         ' bash "$restore_script" "$edid"
+    )
+}
+
+run_restore_script_directly() {
+    local restore_script="$1"
+    local run_dir="$2"
+    local edid="$3"
+    local selection="${4:-1}"
+
+    (
+        cd "$run_dir" || exit 1
+        HIDPI_TEST_EDID="$edid" /bin/bash -c '
+            ioreg() {
+                printf "    | | \\\"IODisplayEDID\\\" = <%s>\\n" "$HIDPI_TEST_EDID"
+            }
+            export -f ioreg
+            printf "%s\n" "$2" | "$1"
+        ' bash "$restore_script" "$selection"
     )
 }
 
@@ -197,6 +216,33 @@ printf 'outside attachment\n' > "$direct_external_attachment"
 run_direct_disable "$direct_root" >/dev/null || fail "legacy disable should remove an attachment link"
 assert_file_absent "$direct_icon"
 assert_file_exists "$direct_external_attachment"
+
+direct_reset_target="${direct_root}/DisplayVendorID-30ae/DisplayProductID-62a5"
+direct_reset_sibling="${direct_root}/DisplayVendorID-30ae/DisplayProductID-7777"
+printf 'direct reset target\n' > "$direct_reset_target"
+printf 'direct reset sibling\n' > "$direct_reset_sibling"
+direct_reset_output=""
+if direct_reset_output="$(run_direct_disable "$direct_root" 2 2>&1)"; then
+    fail "legacy disable must reject the removed full-reset option"
+fi
+assert_contains "$direct_reset_output" "Enter error, bye"
+assert_not_contains "$direct_reset_output" "HIDPI Disabled"
+assert_file_contents "$direct_reset_target" "direct reset target"
+assert_file_contents "$direct_reset_sibling" "direct reset sibling"
+
+direct_delete_failure_root="${scratch_dir}/direct-delete-failure"
+direct_delete_failure_target="${direct_delete_failure_root}/DisplayVendorID-30ae/DisplayProductID-62a5"
+direct_delete_failure_sibling="${direct_delete_failure_root}/DisplayVendorID-30ae/DisplayProductID-7777"
+/bin/mkdir -p "$direct_delete_failure_target" || fail "could not create direct delete-failure fixture"
+printf 'direct delete-failure sibling\n' > "$direct_delete_failure_sibling"
+direct_delete_failure_output=""
+if direct_delete_failure_output="$(run_direct_disable "$direct_delete_failure_root" 2>&1)"; then
+    fail "legacy disable must propagate a real unlink failure"
+fi
+assert_contains "$direct_delete_failure_output" "Unsafe vendor path"
+assert_not_contains "$direct_delete_failure_output" "HIDPI Disabled"
+[[ -d "$direct_delete_failure_target" ]] || fail "failed direct unlink must preserve the target directory"
+assert_file_contents "$direct_delete_failure_sibling" "direct delete-failure sibling"
 
 direct_icons_root="${scratch_dir}/direct-icons"
 direct_icons_path="${direct_icons_root}/Icons.plist"
@@ -267,7 +313,6 @@ if /bin/bash -c '
     Vid=30ae
     Pid=62a5
     langDisableOpt1="(1) Disable HIDPI on this monitor"
-    langDisableOpt2="(2) Reset all settings to macOS default"
     langInputChoice="Enter your choice"
     langDisabled="HIDPI Disabled"
     langUnsafeVendorPath="Unsafe vendor path"
@@ -368,7 +413,6 @@ if direct_vendor_race_output="$(/bin/bash -c '
     Vid=30ae
     Pid=62a5
     langDisableOpt1="(1) Disable HIDPI on this monitor"
-    langDisableOpt2="(2) Reset all settings to macOS default"
     langInputChoice="Enter your choice"
     langDisabled="HIDPI Disabled"
     langUnsafeVendorPath="Unsafe vendor path"
@@ -410,7 +454,6 @@ if /bin/bash -c '
         targetDir="$unsafe_root"
     }
     langDisableOpt1="(1) Disable HIDPI on this monitor"
-    langDisableOpt2="(2) Reset all settings to macOS default"
     langInputChoice="Enter your choice"
     langDisabled="HIDPI Disabled"
     langUnsafeVendorPath="Unsafe vendor path"
@@ -423,7 +466,8 @@ if /bin/bash -c '
 fi
 assert_file_contents "$direct_unsafe_target" "external vendor target"
 
-restore_home="${scratch_dir}/restore"
+restore_volume_root="${scratch_dir}/restore-volume"
+restore_home="${restore_volume_root}/Users/tester"
 /bin/mkdir -p "$restore_home" || fail "could not create restore home"
 generate_restore_script "$restore_home" || fail "legacy restore-script generation should succeed"
 restore_script="${restore_home}/.hidpi-disable"
@@ -437,7 +481,80 @@ assert_contains "$restore_contents" "legacy_remove_vendor_entries ()"
 assert_contains "$restore_contents" "O_NOFOLLOW"
 assert_contains "$restore_contents" "\"/dev/fd/\$icons_fd\""
 assert_contains "$restore_contents" "plutil\", \"-lint\""
+assert_contains "$restore_contents" "legacy_recovery_volume_root_from_script ()"
+assert_contains "$restore_contents" "'%d:%i:%l'"
+assert_not_contains "$restore_contents" 'rootPath="../.."'
+assert_not_contains "$restore_contents" "rm -rf"
 assert_not_contains "$restore_contents" "\$(declare -f"
+
+hidpi_source_contents="$(/bin/cat "$repo_dir/hidpi.sh")" || fail "could not read hidpi source"
+assert_not_contains "$hidpi_source_contents" "sudo rm -rf \${targetDir}"
+assert_not_contains "$hidpi_source_contents" 'langDisableOpt2'
+
+restore_hardlink_source_root="${scratch_dir}/restore-hardlink-source"
+restore_hardlink_source_home="${restore_hardlink_source_root}/Users/tester"
+restore_hardlink_alias_root="${scratch_dir}/restore-hardlink-alias"
+restore_hardlink_alias_home="${restore_hardlink_alias_root}/Users/tester"
+restore_hardlink_alias_run_dir="${restore_hardlink_alias_root}/cwd"
+restore_hardlink_alias_vendor="${restore_hardlink_alias_root}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+restore_hardlink_alias_script="${restore_hardlink_alias_home}/.hidpi-disable"
+restore_hardlink_alias_target="${restore_hardlink_alias_vendor}/DisplayProductID-62a5"
+restore_hardlink_alias_sibling="${restore_hardlink_alias_vendor}/DisplayProductID-7777"
+/bin/mkdir -p "$restore_hardlink_source_home" "$restore_hardlink_alias_home" "$restore_hardlink_alias_run_dir" "$restore_hardlink_alias_vendor" || fail "could not create hard-linked restore-script fixture"
+generate_restore_script "$restore_hardlink_source_home" || fail "hard-link source restore-script generation should succeed"
+/bin/ln "${restore_hardlink_source_home}/.hidpi-disable" "$restore_hardlink_alias_script" || fail "could not create hard-linked restore-script alias"
+printf 'hard-linked restore target\n' > "$restore_hardlink_alias_target"
+printf 'hard-linked restore sibling\n' > "$restore_hardlink_alias_sibling"
+restore_hardlink_output=""
+if restore_hardlink_output="$(run_restore_script_directly "$restore_hardlink_alias_script" "$restore_hardlink_alias_run_dir" "$first_edid" 2>&1)"; then
+    fail "generated restore script must reject a hard-linked script location"
+fi
+assert_contains "$restore_hardlink_output" "Cannot determine the system volume from the restore script location."
+assert_not_contains "$restore_hardlink_output" "HIDPI Disabled"
+assert_file_contents "$restore_hardlink_alias_target" "hard-linked restore target"
+assert_file_contents "$restore_hardlink_alias_sibling" "hard-linked restore sibling"
+
+restore_symlink_source_root="${scratch_dir}/restore-symlink-source"
+restore_symlink_source_home="${restore_symlink_source_root}/Users/tester"
+restore_symlink_alias_root="${scratch_dir}/restore-symlink-alias"
+restore_symlink_alias_home="${restore_symlink_alias_root}/Users/tester"
+restore_symlink_alias_run_dir="${restore_symlink_alias_root}/cwd"
+restore_symlink_alias_vendor="${restore_symlink_alias_root}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+restore_symlink_alias_script="${restore_symlink_alias_home}/.hidpi-disable"
+restore_symlink_alias_target="${restore_symlink_alias_vendor}/DisplayProductID-62a5"
+restore_symlink_alias_sibling="${restore_symlink_alias_vendor}/DisplayProductID-7777"
+/bin/mkdir -p "$restore_symlink_source_home" "$restore_symlink_alias_home" "$restore_symlink_alias_run_dir" "$restore_symlink_alias_vendor" || fail "could not create symbolic-link restore-script fixture"
+generate_restore_script "$restore_symlink_source_home" || fail "symbolic-link source restore-script generation should succeed"
+/bin/ln -s "${restore_symlink_source_home}/.hidpi-disable" "$restore_symlink_alias_script" || fail "could not create symbolic-link restore-script alias"
+printf 'symbolic-link restore target\n' > "$restore_symlink_alias_target"
+printf 'symbolic-link restore sibling\n' > "$restore_symlink_alias_sibling"
+restore_symlink_output=""
+if restore_symlink_output="$(run_restore_script_directly "$restore_symlink_alias_script" "$restore_symlink_alias_run_dir" "$first_edid" 2>&1)"; then
+    fail "generated restore script must reject a symbolic-link script location"
+fi
+assert_contains "$restore_symlink_output" "Cannot determine the system volume from the restore script location."
+assert_not_contains "$restore_symlink_output" "HIDPI Disabled"
+assert_file_contents "$restore_symlink_alias_target" "symbolic-link restore target"
+assert_file_contents "$restore_symlink_alias_sibling" "symbolic-link restore sibling"
+[[ -L "$restore_symlink_alias_script" ]] || fail "generated restore script must preserve its symbolic-link alias"
+
+restore_nonstandard_home="${scratch_dir}/restore-nonstandard"
+restore_nonstandard_run_dir="${scratch_dir}/restore-nonstandard-cwd"
+restore_nonstandard_vendor="${restore_nonstandard_home}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+restore_nonstandard_target="${restore_nonstandard_vendor}/DisplayProductID-62a5"
+restore_nonstandard_sibling="${restore_nonstandard_vendor}/DisplayProductID-7777"
+/bin/mkdir -p "$restore_nonstandard_home" "$restore_nonstandard_run_dir" "$restore_nonstandard_vendor" || fail "could not create non-standard restore fixture"
+generate_restore_script "$restore_nonstandard_home" || fail "non-standard restore-script generation should succeed"
+printf 'non-standard restore target\n' > "$restore_nonstandard_target"
+printf 'non-standard restore sibling\n' > "$restore_nonstandard_sibling"
+restore_nonstandard_output=""
+if restore_nonstandard_output="$(run_restore_script_directly "${restore_nonstandard_home}/.hidpi-disable" "$restore_nonstandard_run_dir" "$first_edid" 2>&1)"; then
+    fail "generated restore script must reject a non-standard script location"
+fi
+assert_contains "$restore_nonstandard_output" "Cannot determine the system volume from the restore script location."
+assert_not_contains "$restore_nonstandard_output" "HIDPI Disabled"
+assert_file_contents "$restore_nonstandard_target" "non-standard restore target"
+assert_file_contents "$restore_nonstandard_sibling" "non-standard restore sibling"
 
 restore_cross_volume_home="$(/usr/bin/mktemp -d "${repo_dir}/.one-key-hidpi-restore-cross-volume.XXXXXX")" || fail "could not create cross-volume restore home"
 restore_cross_volume_home_device="$(/usr/bin/stat -f '%d' "$restore_cross_volume_home")" || fail "could not inspect cross-volume restore home"
@@ -551,22 +668,56 @@ fi
 assert_contains "$init_failure_output" "Cannot create the restore script in the home directory."
 assert_file_absent "$init_failure_trace"
 
-restore_run_dir="${restore_home}/Users/tester"
-restore_target_dir="${restore_home}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+restore_run_dir="${scratch_dir}/cwd-decoy/inside"
+restore_target_dir="${restore_volume_root}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
 restore_target="${restore_target_dir}/DisplayProductID-62a5"
 restore_icon="${restore_target}.icns"
 restore_tiff="${restore_target}.tiff"
 restore_sibling="${restore_target_dir}/DisplayProductID-7777"
-/bin/mkdir -p "$restore_run_dir" "$restore_target_dir" || fail "could not create restore fixture"
+restore_cwd_decoy_target_dir="${scratch_dir}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+restore_cwd_decoy_target="${restore_cwd_decoy_target_dir}/DisplayProductID-62a5"
+restore_cwd_decoy_sibling="${restore_cwd_decoy_target_dir}/DisplayProductID-7777"
+/bin/mkdir -p "$restore_run_dir" "$restore_target_dir" "$restore_cwd_decoy_target_dir" || fail "could not create restore fixture"
 printf 'restore target\n' > "$restore_target"
 printf 'restore icon\n' > "$restore_icon"
 printf 'restore tiff\n' > "$restore_tiff"
 printf 'restore sibling\n' > "$restore_sibling"
-run_restore_script "$restore_script" "$restore_run_dir" "$first_edid" >/dev/null || fail "generated restore script should remove the selected display"
+printf 'cwd decoy target\n' > "$restore_cwd_decoy_target"
+printf 'cwd decoy sibling\n' > "$restore_cwd_decoy_sibling"
+restore_reset_output=""
+if restore_reset_output="$(run_restore_script_directly "$restore_script" "$restore_run_dir" "$first_edid" 2 2>&1)"; then
+    fail "generated restore script must reject the removed full-reset option"
+fi
+assert_contains "$restore_reset_output" "Enter error, bye"
+assert_not_contains "$restore_reset_output" "HIDPI Disabled"
+assert_file_contents "$restore_target" "restore target"
+assert_file_contents "$restore_sibling" "restore sibling"
+assert_file_contents "$restore_cwd_decoy_target" "cwd decoy target"
+assert_file_contents "$restore_cwd_decoy_sibling" "cwd decoy sibling"
+run_restore_script_directly "$restore_script" "$restore_run_dir" "$first_edid" >/dev/null || fail "generated restore script should remove the selected display from its own volume"
 assert_file_absent "$restore_target"
 assert_file_absent "$restore_icon"
 assert_file_absent "$restore_tiff"
 assert_file_exists "$restore_sibling"
+assert_file_contents "$restore_cwd_decoy_target" "cwd decoy target"
+assert_file_contents "$restore_cwd_decoy_sibling" "cwd decoy sibling"
+
+restore_copy_volume_root="${scratch_dir}/restore-copy-volume"
+restore_copy_home="${restore_copy_volume_root}/Users/tester"
+restore_copy_script="${restore_copy_home}/.hidpi-disable"
+restore_copy_run_dir="${scratch_dir}/restore-copy-cwd"
+restore_copy_vendor="${restore_copy_volume_root}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+restore_copy_target="${restore_copy_vendor}/DisplayProductID-62a5"
+restore_copy_sibling="${restore_copy_vendor}/DisplayProductID-7777"
+/bin/mkdir -p "$restore_copy_home" "$restore_copy_run_dir" "$restore_copy_vendor" || fail "could not create copied restore-script fixture"
+/bin/cp "$restore_script" "$restore_copy_script" || fail "could not copy restore script into a second volume fixture"
+printf 'source-volume target\n' > "$restore_target"
+printf 'copied restore target\n' > "$restore_copy_target"
+printf 'copied restore sibling\n' > "$restore_copy_sibling"
+run_restore_script_directly "$restore_copy_script" "$restore_copy_run_dir" "$first_edid" >/dev/null || fail "copied restore script should bind cleanup to its own volume"
+assert_file_contents "$restore_target" "source-volume target"
+assert_file_absent "$restore_copy_target"
+assert_file_contents "$restore_copy_sibling" "copied restore sibling"
 
 printf 'orphan restore icon\n' > "$restore_icon"
 printf 'orphan restore tiff\n' > "$restore_tiff"
@@ -574,24 +725,26 @@ run_restore_script "$restore_script" "$restore_run_dir" "$first_edid" >/dev/null
 assert_file_absent "$restore_icon"
 assert_file_absent "$restore_tiff"
 
-restore_external_attachment="${restore_home}/outside-attachment"
+restore_external_attachment="${restore_volume_root}/outside-attachment"
 printf 'restore outside attachment\n' > "$restore_external_attachment"
 /bin/ln -s "$restore_external_attachment" "$restore_icon" || fail "could not create restore attachment link"
 run_restore_script "$restore_script" "$restore_run_dir" "$first_edid" >/dev/null || fail "generated restore script should remove an attachment link"
 assert_file_absent "$restore_icon"
 assert_file_exists "$restore_external_attachment"
 
-restore_icons_path="${restore_home}/Library/Displays/Contents/Resources/Overrides/Icons.plist"
+restore_icons_path="${restore_volume_root}/Library/Displays/Contents/Resources/Overrides/Icons.plist"
 create_icons_plist_fixture "$restore_icons_path"
 run_restore_script "$restore_script" "$restore_run_dir" "$first_edid" >/dev/null || fail "generated restore script should remove its Icons.plist product entry"
 assert_plist_key_absent "$restore_icons_path" vendors.30ae.products.62a5
 assert_plist_key_present "$restore_icons_path" vendors.30ae.products.7777
 
 restore_icons_hardlink_home="${scratch_dir}/restore-icons-hardlink"
-restore_icons_hardlink_run_dir="${restore_icons_hardlink_home}/Users/tester"
-restore_icons_hardlink_path="${restore_icons_hardlink_home}/Library/Displays/Contents/Resources/Overrides/Icons.plist"
-restore_icons_hardlink_outside="${restore_icons_hardlink_home}/outside.plist"
-/bin/mkdir -p "$restore_icons_hardlink_run_dir" "$(/usr/bin/dirname "$restore_icons_hardlink_path")" || fail "could not create hard-linked restore Icons.plist root"
+restore_icons_hardlink_volume_root="${restore_icons_hardlink_home}/volume"
+restore_icons_hardlink_home="${restore_icons_hardlink_volume_root}/Users/tester"
+restore_icons_hardlink_run_dir="${restore_icons_hardlink_volume_root}/cwd"
+restore_icons_hardlink_path="${restore_icons_hardlink_volume_root}/Library/Displays/Contents/Resources/Overrides/Icons.plist"
+restore_icons_hardlink_outside="${restore_icons_hardlink_volume_root}/outside.plist"
+/bin/mkdir -p "$restore_icons_hardlink_home" "$restore_icons_hardlink_run_dir" "$(/usr/bin/dirname "$restore_icons_hardlink_path")" || fail "could not create hard-linked restore Icons.plist root"
 generate_restore_script "$restore_icons_hardlink_home" || fail "hard-linked restore-script generation should succeed"
 create_icons_plist_fixture "$restore_icons_hardlink_path"
 /bin/ln "$restore_icons_hardlink_path" "$restore_icons_hardlink_outside" || fail "could not create hard-linked restore Icons.plist alias"
@@ -604,9 +757,11 @@ assert_plist_key_present "$restore_icons_hardlink_path" vendors.30ae.products.62
 assert_plist_key_present "$restore_icons_hardlink_outside" vendors.30ae.products.62a5
 
 restore_invalid_home="${scratch_dir}/restore-invalid"
-restore_invalid_run_dir="${restore_invalid_home}/Users/tester"
-restore_invalid_root="${restore_invalid_home}/Library/Displays/Contents/Resources/Overrides"
-/bin/mkdir -p "$restore_invalid_run_dir" "$restore_invalid_root" || fail "could not create invalid restore fixture"
+restore_invalid_volume_root="${restore_invalid_home}/volume"
+restore_invalid_home="${restore_invalid_volume_root}/Users/tester"
+restore_invalid_run_dir="${restore_invalid_volume_root}/cwd"
+restore_invalid_root="${restore_invalid_volume_root}/Library/Displays/Contents/Resources/Overrides"
+/bin/mkdir -p "$restore_invalid_home" "$restore_invalid_run_dir" "$restore_invalid_root" || fail "could not create invalid restore fixture"
 generate_restore_script "$restore_invalid_home" || fail "invalid restore-script generation should succeed"
 printf 'not a plist\n' > "${restore_invalid_root}/Icons.plist"
 restore_invalid_output=""
@@ -617,11 +772,13 @@ assert_contains "$restore_invalid_output" "Unsafe vendor override path"
 assert_file_contents "${restore_invalid_root}/Icons.plist" "not a plist"
 
 restore_icons_link_home="${scratch_dir}/restore-icons-link"
-restore_icons_link_run_dir="${restore_icons_link_home}/Users/tester"
-restore_icons_link_root="${restore_icons_link_home}/Library/Displays/Contents/Resources/Overrides"
+restore_icons_link_volume_root="${restore_icons_link_home}/volume"
+restore_icons_link_home="${restore_icons_link_volume_root}/Users/tester"
+restore_icons_link_run_dir="${restore_icons_link_volume_root}/cwd"
+restore_icons_link_root="${restore_icons_link_volume_root}/Library/Displays/Contents/Resources/Overrides"
 restore_icons_link_path="${restore_icons_link_root}/Icons.plist"
-restore_icons_link_outside="${restore_icons_link_home}/outside.plist"
-/bin/mkdir -p "$restore_icons_link_run_dir" "$restore_icons_link_root" || fail "could not create linked restore fixture"
+restore_icons_link_outside="${restore_icons_link_volume_root}/outside.plist"
+/bin/mkdir -p "$restore_icons_link_home" "$restore_icons_link_run_dir" "$restore_icons_link_root" || fail "could not create linked restore fixture"
 generate_restore_script "$restore_icons_link_home" || fail "linked restore-script generation should succeed"
 create_icons_plist_fixture "$restore_icons_link_outside"
 /bin/ln -s "$restore_icons_link_outside" "$restore_icons_link_path" || fail "could not create linked restore Icons.plist"
@@ -634,11 +791,13 @@ assert_plist_key_present "$restore_icons_link_outside" vendors.30ae.products.62a
 [[ -L "$restore_icons_link_path" ]] || fail "generated restore script must preserve the Icons.plist link"
 
 restore_icons_race_home="${scratch_dir}/restore-icons-race"
-restore_icons_race_run_dir="${restore_icons_race_home}/Users/tester"
-restore_icons_race_root="${restore_icons_race_home}/Library/Displays/Contents/Resources/Overrides"
+restore_icons_race_volume_root="${restore_icons_race_home}/volume"
+restore_icons_race_home="${restore_icons_race_volume_root}/Users/tester"
+restore_icons_race_run_dir="${restore_icons_race_volume_root}/cwd"
+restore_icons_race_root="${restore_icons_race_volume_root}/Library/Displays/Contents/Resources/Overrides"
 restore_icons_race_path="${restore_icons_race_root}/Icons.plist"
-restore_icons_race_outside="${restore_icons_race_home}/outside.plist"
-/bin/mkdir -p "$restore_icons_race_run_dir" "$restore_icons_race_root" || fail "could not create raced restore fixture"
+restore_icons_race_outside="${restore_icons_race_volume_root}/outside.plist"
+/bin/mkdir -p "$restore_icons_race_home" "$restore_icons_race_run_dir" "$restore_icons_race_root" || fail "could not create raced restore fixture"
 generate_restore_script "$restore_icons_race_home" || fail "raced restore-script generation should succeed"
 create_icons_plist_fixture "$restore_icons_race_path"
 create_icons_plist_fixture "$restore_icons_race_outside"
@@ -666,7 +825,11 @@ if restore_icons_race_output="$(
                 ;;
             esac
         }
-        trap race_before_icon_cleanup DEBUG
+        read() {
+            set -o functrace
+            trap race_before_icon_cleanup DEBUG
+            builtin read "$@"
+        }
         source "$1"
     ' bash "${restore_icons_race_home}/.hidpi-disable" "$first_edid" "$restore_icons_race_path" "$restore_icons_race_outside" 2>&1
 )"; then
@@ -677,21 +840,44 @@ assert_plist_key_present "$restore_icons_race_outside" vendors.30ae.products.62a
 [[ -L "$restore_icons_race_path" ]] || fail "generated restore script must preserve the raced Icons.plist link"
 
 restore_empty_home="${scratch_dir}/restore-empty"
-restore_empty_run_dir="${restore_empty_home}/Users/tester"
-restore_empty_vendor="${restore_empty_home}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
-/bin/mkdir -p "$restore_empty_run_dir" "$restore_empty_vendor" || fail "could not create empty restore fixture"
+restore_empty_volume_root="${restore_empty_home}/volume"
+restore_empty_home="${restore_empty_volume_root}/Users/tester"
+restore_empty_run_dir="${restore_empty_volume_root}/cwd"
+restore_empty_vendor="${restore_empty_volume_root}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+/bin/mkdir -p "$restore_empty_home" "$restore_empty_run_dir" "$restore_empty_vendor" || fail "could not create empty restore fixture"
 generate_restore_script "$restore_empty_home" || fail "empty restore-script generation should succeed"
 printf 'empty restore target\n' > "${restore_empty_vendor}/DisplayProductID-62a5"
 run_restore_script "${restore_empty_home}/.hidpi-disable" "$restore_empty_run_dir" "$first_edid" >/dev/null || fail "generated restore script should clean a selected entry from an empty vendor directory"
 assert_directory_empty "$restore_empty_vendor"
 
+restore_delete_failure_home="${scratch_dir}/restore-delete-failure"
+restore_delete_failure_volume_root="${restore_delete_failure_home}/volume"
+restore_delete_failure_home="${restore_delete_failure_volume_root}/Users/tester"
+restore_delete_failure_run_dir="${restore_delete_failure_volume_root}/cwd"
+restore_delete_failure_vendor="${restore_delete_failure_volume_root}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+restore_delete_failure_target="${restore_delete_failure_vendor}/DisplayProductID-62a5"
+restore_delete_failure_sibling="${restore_delete_failure_vendor}/DisplayProductID-7777"
+/bin/mkdir -p "$restore_delete_failure_home" "$restore_delete_failure_run_dir" "$restore_delete_failure_target" || fail "could not create delete-failure restore fixture"
+generate_restore_script "$restore_delete_failure_home" || fail "delete-failure restore-script generation should succeed"
+printf 'delete-failure restore sibling\n' > "$restore_delete_failure_sibling"
+restore_delete_failure_output=""
+if restore_delete_failure_output="$(run_restore_script "${restore_delete_failure_home}/.hidpi-disable" "$restore_delete_failure_run_dir" "$first_edid" 2>&1)"; then
+    fail "generated restore script must propagate a real unlink failure"
+fi
+assert_contains "$restore_delete_failure_output" "Unsafe vendor override path"
+assert_not_contains "$restore_delete_failure_output" "HIDPI Disabled"
+[[ -d "$restore_delete_failure_target" ]] || fail "failed unlink must preserve the target directory"
+assert_file_contents "$restore_delete_failure_sibling" "delete-failure restore sibling"
+
 restore_unsafe_home="${scratch_dir}/restore-unsafe"
-restore_unsafe_run_dir="${restore_unsafe_home}/Users/tester"
-restore_unsafe_parent="${restore_unsafe_home}/Library/Displays/Contents/Resources/Overrides"
+restore_unsafe_volume_root="${restore_unsafe_home}/volume"
+restore_unsafe_home="${restore_unsafe_volume_root}/Users/tester"
+restore_unsafe_run_dir="${restore_unsafe_volume_root}/cwd"
+restore_unsafe_parent="${restore_unsafe_volume_root}/Library/Displays/Contents/Resources/Overrides"
 restore_unsafe_vendor="${restore_unsafe_parent}/DisplayVendorID-30ae"
-restore_unsafe_outside="${restore_unsafe_home}/outside"
+restore_unsafe_outside="${restore_unsafe_volume_root}/outside"
 restore_unsafe_target="${restore_unsafe_outside}/DisplayProductID-62a5"
-/bin/mkdir -p "$restore_unsafe_run_dir" "$restore_unsafe_parent" "$restore_unsafe_outside" || fail "could not create unsafe restore fixture"
+/bin/mkdir -p "$restore_unsafe_home" "$restore_unsafe_run_dir" "$restore_unsafe_parent" "$restore_unsafe_outside" || fail "could not create unsafe restore fixture"
 generate_restore_script "$restore_unsafe_home" || fail "unsafe restore-script generation should succeed"
 printf 'external restore target\n' > "$restore_unsafe_target"
 /bin/ln -s "$restore_unsafe_outside" "$restore_unsafe_vendor" || fail "could not create unsafe restore vendor link"
@@ -704,13 +890,15 @@ assert_file_contents "$restore_unsafe_target" "external restore target"
 [[ -L "$restore_unsafe_vendor" ]] || fail "generated restore script must preserve the unsafe vendor link"
 
 restore_preflight_home="${scratch_dir}/restore-preflight"
-restore_preflight_run_dir="${restore_preflight_home}/Users/tester"
-restore_preflight_root="${restore_preflight_home}/Library/Displays/Contents/Resources/Overrides"
+restore_preflight_volume_root="${restore_preflight_home}/volume"
+restore_preflight_home="${restore_preflight_volume_root}/Users/tester"
+restore_preflight_run_dir="${restore_preflight_volume_root}/cwd"
+restore_preflight_root="${restore_preflight_volume_root}/Library/Displays/Contents/Resources/Overrides"
 restore_preflight_vendor="${restore_preflight_root}/DisplayVendorID-30ae"
-restore_preflight_outside="${restore_preflight_home}/outside"
+restore_preflight_outside="${restore_preflight_volume_root}/outside"
 restore_preflight_target="${restore_preflight_outside}/DisplayProductID-62a5"
 restore_preflight_icons="${restore_preflight_root}/Icons.plist"
-/bin/mkdir -p "$restore_preflight_run_dir" "$restore_preflight_root" "$restore_preflight_outside" || fail "could not create restore preflight fixture"
+/bin/mkdir -p "$restore_preflight_home" "$restore_preflight_run_dir" "$restore_preflight_root" "$restore_preflight_outside" || fail "could not create restore preflight fixture"
 generate_restore_script "$restore_preflight_home" || fail "restore preflight generation should succeed"
 printf 'restore preflight external target\n' > "$restore_preflight_target"
 create_icons_plist_fixture "$restore_preflight_icons"
@@ -726,11 +914,13 @@ assert_file_contents "$restore_preflight_target" "restore preflight external tar
 [[ -L "$restore_preflight_vendor" ]] || fail "generated restore script must preserve a preflight-rejected vendor link"
 
 restore_vendor_race_home="${scratch_dir}/restore-vendor-race"
-restore_vendor_race_run_dir="${restore_vendor_race_home}/Users/tester"
-restore_vendor_race_vendor="${restore_vendor_race_home}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
-restore_vendor_race_outside="${restore_vendor_race_home}/outside"
+restore_vendor_race_volume_root="${restore_vendor_race_home}/volume"
+restore_vendor_race_home="${restore_vendor_race_volume_root}/Users/tester"
+restore_vendor_race_run_dir="${restore_vendor_race_volume_root}/cwd"
+restore_vendor_race_vendor="${restore_vendor_race_volume_root}/Library/Displays/Contents/Resources/Overrides/DisplayVendorID-30ae"
+restore_vendor_race_outside="${restore_vendor_race_volume_root}/outside"
 restore_vendor_race_target="${restore_vendor_race_outside}/DisplayProductID-62a5"
-/bin/mkdir -p "$restore_vendor_race_run_dir" "$restore_vendor_race_vendor" "$restore_vendor_race_outside" || fail "could not create restore vendor race fixture"
+/bin/mkdir -p "$restore_vendor_race_home" "$restore_vendor_race_run_dir" "$restore_vendor_race_vendor" "$restore_vendor_race_outside" || fail "could not create restore vendor race fixture"
 generate_restore_script "$restore_vendor_race_home" || fail "restore vendor race generation should succeed"
 printf 'restore race target\n' > "${restore_vendor_race_vendor}/DisplayProductID-62a5"
 printf 'restore external target\n' > "$restore_vendor_race_target"
@@ -758,7 +948,11 @@ if restore_vendor_race_output="$(
                 ;;
             esac
         }
-        trap race_before_vendor_cleanup DEBUG
+        read() {
+            set -o functrace
+            trap race_before_vendor_cleanup DEBUG
+            builtin read "$@"
+        }
         source "$1"
     ' bash "${restore_vendor_race_home}/.hidpi-disable" "$first_edid" "$restore_vendor_race_vendor" "$restore_vendor_race_outside" 2>&1
 )"; then

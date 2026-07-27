@@ -54,7 +54,6 @@ langIntelSafeToolMissing="Intel safe HiDPI tool is missing."
 langUnsafeVendorPath="Refusing to modify an unsafe vendor override path."
 
 langDisableOpt1="(1) Disable HIDPI on this monitor"
-langDisableOpt2="(2) Reset all settings to macOS default"
 
 langChooseRes="resolution config"
 langChooseResOp1="(1) 1920x1080 Display"
@@ -103,7 +102,6 @@ if [[ "${systemLanguage}" == "zh_CN" ]]; then
     langUnsafeVendorPath="拒绝修改不安全的显示器厂商 override 路径。"
 
     langDisableOpt1="(1) 在此显示器上禁用 HIDPI"
-    langDisableOpt2="(2) 还原所有设置至 macOS 默认"
 
     langChooseRes="选择分辨率配置"
     langChooseResOp1="(1) 1920x1080 显示屏"
@@ -140,7 +138,6 @@ elif [[ "${systemLanguage}" == "uk_UA" ]]; then
     langDisableHIDPI="(%d) Вимкнути HIDPI"
 
     langDisableOpt1="(1) Вимкнути HIDPI для цього монітору"
-    langDisableOpt2="(2) Відновити заводські налаштування macOS"
 
     langChooseRes="Налаштувати роздільну здатність"
     langChooseResOp1="(1) 1920x1080 монітор"
@@ -544,6 +541,35 @@ function legacy_preflight_single_display_cleanup() {
     ' "$overrides_path" "$vendor_name"
 }
 
+function legacy_recovery_volume_root_from_script() {
+    local restore_script_source="${BASH_SOURCE[0]:-}"
+    local restore_script_name
+    local restore_script_directory
+    local restore_users_directory
+    local restore_user_name
+    local restore_volume_root
+    local restore_script_identity
+    local restore_canonical_identity
+
+    [[ -n "$restore_script_source" ]] || return 1
+    restore_script_name="$(/usr/bin/basename "$restore_script_source")" || return 1
+    [[ "$restore_script_name" == ".hidpi-disable" ]] || return 1
+    [[ -f "$restore_script_source" && ! -L "$restore_script_source" ]] || return 1
+    restore_script_identity="$(/usr/bin/stat -f '%d:%i:%l' "$restore_script_source")" || return 1
+    [[ "$restore_script_identity" =~ ^[0-9]+:[0-9]+:1$ ]] || return 1
+    restore_script_directory="$(cd "$(/usr/bin/dirname "$restore_script_source")" && pwd -P)" || return 1
+    [[ -f "${restore_script_directory}/${restore_script_name}" && ! -L "${restore_script_directory}/${restore_script_name}" ]] || return 1
+    restore_canonical_identity="$(/usr/bin/stat -f '%d:%i:%l' "${restore_script_directory}/${restore_script_name}")" || return 1
+    [[ "$restore_canonical_identity" == "$restore_script_identity" ]] || return 1
+    restore_user_name="${restore_script_directory##*/}"
+    [[ -n "$restore_user_name" && "$restore_user_name" != "." && "$restore_user_name" != ".." ]] || return 1
+    restore_users_directory="$(/usr/bin/dirname "$restore_script_directory")" || return 1
+    [[ "$(/usr/bin/basename "$restore_users_directory")" == "Users" ]] || return 1
+    restore_volume_root="$(cd "${restore_users_directory}/.." && pwd -P)" || return 1
+    [[ "$restore_volume_root" == /* && -d "$restore_volume_root" ]] || return 1
+    printf '%s\n' "$restore_volume_root"
+}
+
 function legacy_publish_restore_script() {
     local source_path="$1"
     local restore_directory="$2"
@@ -740,8 +766,6 @@ function get_vidpid_applesilicon() {
     Pid=($(printf '%x\n' ${ProductID}))
 }
 
-get_vidpid_applesilicon
-
 CCC
             cleanup_restore_temporary
             return 1
@@ -789,8 +813,6 @@ function get_edid() {
     Pid=($(printf '%x\n' ${ProductID}))
 }
 
-get_edid
-
 CCC
             cleanup_restore_temporary
             return 1
@@ -802,12 +824,23 @@ CCC
         declare -f legacy_remove_icon_product_entry
         declare -f legacy_remove_vendor_entries
         declare -f legacy_preflight_single_display_cleanup
+        declare -f legacy_recovery_volume_root_from_script
     } >>"$restore_temporary" || {
         cleanup_restore_temporary
         return 1
     }
 
     if ! cat >>"$restore_temporary" <<-'CCC'
+restoreVolumeRoot="$(legacy_recovery_volume_root_from_script)" || {
+    echo "Cannot determine the system volume from the restore script location. Exiting..." >&2
+    exit 1
+}
+if declare -F get_vidpid_applesilicon >/dev/null 2>&1; then
+    get_vidpid_applesilicon
+else
+    get_edid
+fi
+
 # Check if monitor was found
 if [[ -z $VendorID || -z $ProductID || $VendorID == 0 || $ProductID == 0 ]]; then
     echo "No monitors found. Exiting..."
@@ -816,15 +849,13 @@ fi
 
 echo "Your monitor VID/PID: $Vid:$Pid"
 
-rootPath="../.."
-restorePath="${rootPath}/Library/Displays/Contents/Resources/Overrides"
+restorePath="${restoreVolumeRoot%/}/Library/Displays/Contents/Resources/Overrides"
 
 echo ""
 echo "(1) Disable HIDPI on this monitor"
-echo "(2) Reset all settings to macOS default"
 echo ""
 
-read -p "Enter your choice [1~2]: " input
+read -p "Enter your choice [1]: " input
 case ${input} in
 1)
     vendorPath="${restorePath}/DisplayVendorID-${Vid}"
@@ -844,9 +875,6 @@ case ${input} in
             exit 1
         }
     fi
-    ;;
-2)
-    rm -rf "${restorePath}"
     ;;
 *)
 
@@ -1178,10 +1206,9 @@ function disable() {
 
     echo ""
     echo "${langDisableOpt1}"
-    echo "${langDisableOpt2}"
     echo ""
 
-    read -p "${langInputChoice} [1~2]: " input
+    read -p "${langInputChoice} [1]: " input
     case ${input} in
     1)
         legacy_preflight_single_display_cleanup true "$targetDir" "$Vid" || {
@@ -1200,9 +1227,6 @@ function disable() {
                 return 1
             }
         fi
-        ;;
-    2)
-        sudo rm -rf "${targetDir}"
         ;;
     *)
 

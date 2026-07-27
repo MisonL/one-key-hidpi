@@ -88,6 +88,14 @@ cd "user name"
 ./.hidpi-disable
 ```
 
+Run `.hidpi-disable` directly, not through a symbolic link or hard link. It
+must be under `Users/<user>/` on the intended system volume. It can be run
+from any current directory, but it removes only the selected display's
+override and icon attachments from the volume containing the script. A
+standalone copy or move placed under another valid `<volume>/Users/<user>/`
+layout targets that other volume, so do not copy or move it unless that is
+intentional. It has no reset-all option.
+
 2.
 
 Do not recursively remove the entire
