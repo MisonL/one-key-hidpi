@@ -59,6 +59,37 @@ and is not evidence of the current display state. The file must be a regular
 text capture no larger than 1 MiB; symbolic links are rejected. Each option
 may be supplied only once; duplicates fail explicitly.
 
+### Smooth HiDPI modes
+
+The local Intel safe menu lets you choose the existing compatibility preset or
+the explicit `smooth` set. `smooth` generates exact-aspect-ratio 2x HiDPI
+logical modes from no less than two-thirds of the native panel size through
+native size, with at most 41 candidates. On a 1920x1080 panel this is 41 modes from
+1280x720 through 1920x1080 in 16x9 steps. You can explicitly add the
+`1920x1079` near-native compatibility mode when it is appropriate for the
+target panel.
+
+The same selection is available from the CLI:
+
+```bash
+./intel-hidpi.sh preview --native-resolution 1920x1080 --mode-set smooth \
+  --include-near-native
+
+./intel-hidpi.sh verify-modes --vendor-id <vendor-id> --product-id <product-id> \
+  --native-resolution 1920x1080 --mode-set smooth --include-near-native
+```
+
+`preset` remains the default for `preview`, `apply`, and `verify-modes`.
+`--include-near-native` is valid only with `--mode-set smooth`. A panel that
+cannot provide at least two exact-aspect-ratio candidates in that range fails
+explicitly rather than silently falling back to one mode. This EDID override
+mode generator is not a replacement for BetterDisplay's GUI or its live
+display reconfiguration behavior.
+
+When applying a previewed selection, pass the same `--mode-set` and
+`--include-near-native` options to `apply`; different options deliberately
+produce a different candidate set.
+
 ![RUN](./img/run.jpg)
 
 ## Recovery

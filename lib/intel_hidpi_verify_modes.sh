@@ -101,6 +101,8 @@ parse_runtime_mode_capture() {
 
 collect_generated_mode_records() {
     local native_resolution="$1"
+    local mode_set="${2:-$MODE_SET_PRESET}"
+    local include_near_native="${3:-false}"
     local preview_output
     local line
     local name
@@ -109,9 +111,9 @@ collect_generated_mode_records() {
     local payload
 
     GENERATED_MODE_RECORDS=""
-    preview_output="$(preview "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT")" || return 1
+    preview_output="$(preview "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" "$mode_set" "$include_near_native")" || return 1
     while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" =~ ^([a-z]+):\ ([1-9][0-9]*x[1-9][0-9]*)\ framebuffer=([1-9][0-9]*x[1-9][0-9]*)\ payload=([A-Za-z0-9+/]+={0,2})$ ]] || return 1
+        [[ "$line" =~ ^([a-z0-9-]+):\ ([1-9][0-9]*x[1-9][0-9]*)\ framebuffer=([1-9][0-9]*x[1-9][0-9]*)\ payload=([A-Za-z0-9+/]+={0,2})$ ]] || return 1
         name="${BASH_REMATCH[1]}"
         logical_resolution="${BASH_REMATCH[2]}"
         framebuffer_resolution="${BASH_REMATCH[3]}"
@@ -131,6 +133,8 @@ verify_mode_capture() {
     local native_resolution="$3"
     local capture="$4"
     local capture_source="$5"
+    local mode_set="${6:-$MODE_SET_PRESET}"
+    local include_near_native="${7:-false}"
     local capture_status=0
     local name
     local logical_resolution
@@ -146,7 +150,8 @@ verify_mode_capture() {
         ;;
     esac
 
-    collect_generated_mode_records "$native_resolution" || fail "could not generate runtime verification candidates"
+    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
+    collect_generated_mode_records "$native_resolution" "$mode_set" "$include_near_native" || fail "could not generate runtime verification candidates"
     parse_runtime_mode_capture "$capture" "$vendor_id" "$product_id" || capture_status=$?
     case "$capture_status" in
     0)
@@ -188,10 +193,14 @@ run_verify_modes_command() {
     local product_id=""
     local native_resolution=""
     local modes_file=""
+    local mode_set="$MODE_SET_PRESET"
+    local include_near_native=false
     local vendor_id_provided=false
     local product_id_provided=false
     local native_resolution_provided=false
     local modes_file_provided=false
+    local mode_set_provided=false
+    local near_native_provided=false
     local capture
     local capture_source="live-coregraphics"
     local capture_status=0
@@ -226,6 +235,19 @@ run_verify_modes_command() {
             modes_file_provided=true
             shift 2
             ;;
+        --mode-set)
+            (($# >= 2)) || fail "--mode-set requires preset or smooth"
+            [[ "$mode_set_provided" == false ]] || fail "--mode-set may only be provided once"
+            mode_set="$2"
+            mode_set_provided=true
+            shift 2
+            ;;
+        --include-near-native)
+            [[ "$near_native_provided" == false ]] || fail "--include-near-native may only be provided once"
+            include_near_native=true
+            near_native_provided=true
+            shift
+            ;;
         *)
             fail "unknown verify-modes option: $1"
             ;;
@@ -236,6 +258,7 @@ run_verify_modes_command() {
     vendor_id="$(normalize_hex_id "$vendor_id")" || fail "vendor id is invalid"
     product_id="$(normalize_hex_id "$product_id")" || fail "product id is invalid"
     parse_resolution "$native_resolution" >/dev/null || fail "native resolution must use positive WIDTHxHEIGHT values"
+    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
 
     if [[ "$modes_file_provided" == true ]]; then
         [[ -n "$modes_file" ]] || fail "--modes-file requires a regular file path"
@@ -258,5 +281,5 @@ run_verify_modes_command() {
         capture="$(capture_runtime_modes "$vendor_id" "$product_id")" || fail "could not capture target display modes"
     fi
 
-    verify_mode_capture "$vendor_id" "$product_id" "$native_resolution" "$capture" "$capture_source"
+    verify_mode_capture "$vendor_id" "$product_id" "$native_resolution" "$capture" "$capture_source" "$mode_set" "$include_near_native"
 }

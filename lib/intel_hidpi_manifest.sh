@@ -46,6 +46,8 @@ write_manifest() {
     local candidate_identity="${11}"
     local expected_hash="${12}"
     local expected_identity="${13}"
+    local mode_set="${14:-$MODE_SET_PRESET}"
+    local include_near_native="${15:-false}"
     local current_hash="$expected_hash"
     local current_identity="$expected_identity"
     local boot_session
@@ -53,6 +55,7 @@ write_manifest() {
     valid_sha256 "$expected_hash" || return 1
     valid_file_identity "$expected_identity" || return 1
     valid_file_identity "$candidate_identity" || return 1
+    validate_mode_configuration "$mode_set" "$include_near_native" || return 1
     boot_session="$(current_boot_session)" || return 1
     [[ "$boot_session" =~ ^[0-9]+:[0-9]+$ ]] || return 1
     run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -create xml1 || return 1
@@ -80,6 +83,12 @@ write_manifest() {
     current_hash="$PLIST_OPERATION_HASH"
     current_identity="$PLIST_OPERATION_IDENTITY"
     run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert native-resolution -string "$native_resolution" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert mode-set -string "$mode_set" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert include-near-native -bool "$include_near_native" || return 1
     current_hash="$PLIST_OPERATION_HASH"
     current_identity="$PLIST_OPERATION_IDENTITY"
     run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert original-sha256 -string "$original_hash" || return 1

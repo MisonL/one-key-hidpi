@@ -18,9 +18,9 @@ usage() {
 Usage:
   intel-hidpi.sh inventory [--ioreg-file PATH] [--overrides-root PATH]
   intel-hidpi.sh native-resolution --edid HEX
-  intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS]
-  intel-hidpi.sh verify-modes --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--modes-file PATH]
-  intel-hidpi.sh apply --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--overrides-root PATH] [--state-root PATH] --confirm
+  intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS] [--mode-set preset|smooth] [--include-near-native]
+  intel-hidpi.sh verify-modes --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--mode-set preset|smooth] [--include-near-native] [--modes-file PATH]
+  intel-hidpi.sh apply --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--mode-set preset|smooth] [--include-near-native] [--overrides-root PATH] [--state-root PATH] --confirm
   intel-hidpi.sh revert --vendor-id HEX --product-id HEX [--overrides-root PATH] [--state-root PATH] [--migrate-v4] --confirm
 
 Commands:
@@ -108,6 +108,20 @@ scale_dimension_to_even() {
     printf '%s\n' "$scaled_dimension"
 }
 
+greatest_common_divisor() {
+    local left="$1"
+    local right="$2"
+    local remainder
+
+    [[ "$left" =~ ^[1-9][0-9]*$ && "$right" =~ ^[1-9][0-9]*$ ]] || return 1
+    while ((right > 0)); do
+        remainder=$((left % right))
+        left="$right"
+        right="$remainder"
+    done
+    printf '%s\n' "$left"
+}
+
 hidpi_payload() {
     local framebuffer_width="$1"
     local framebuffer_height="$2"
@@ -125,21 +139,16 @@ source "${SCRIPT_DIR}/lib/intel_hidpi_storage.sh" || fail "could not load Intel 
 # shellcheck source=lib/intel_hidpi_verify_modes.sh
 source "${SCRIPT_DIR}/lib/intel_hidpi_verify_modes.sh" || fail "could not load Intel HiDPI runtime verification helpers"
 
-print_preview_mode() {
+print_hidpi_preview_mode() {
     local name="$1"
-    local native_width="$2"
-    local native_height="$3"
-    local numerator="$4"
-    local denominator="$5"
-    local framebuffer_limit="$6"
-    local logical_width
-    local logical_height
+    local logical_width="$2"
+    local logical_height="$3"
+    local framebuffer_limit="$4"
     local framebuffer_width
     local framebuffer_height
     local payload
 
-    logical_width="$(scale_dimension_to_even "$native_width" "$numerator" "$denominator")" || return 1
-    logical_height="$(scale_dimension_to_even "$native_height" "$numerator" "$denominator")" || return 1
+    [[ "$logical_width" =~ ^[1-9][0-9]*$ && "$logical_height" =~ ^[1-9][0-9]*$ ]] || return 1
     framebuffer_width=$((logical_width * 2))
     framebuffer_height=$((logical_height * 2))
 
@@ -152,22 +161,30 @@ print_preview_mode() {
         "$name" "$logical_width" "$logical_height" "$framebuffer_width" "$framebuffer_height" "$payload"
 }
 
-preview() {
-    local native_resolution="$1"
-    local framebuffer_limit="$2"
-    local parsed_resolution
-    local native_width
-    local native_height
+print_preview_mode() {
+    local name="$1"
+    local native_width="$2"
+    local native_height="$3"
+    local numerator="$4"
+    local denominator="$5"
+    local framebuffer_limit="$6"
+    local logical_width
+    local logical_height
+
+    logical_width="$(scale_dimension_to_even "$native_width" "$numerator" "$denominator")" || return 1
+    logical_height="$(scale_dimension_to_even "$native_height" "$numerator" "$denominator")" || return 1
+    print_hidpi_preview_mode "$name" "$logical_width" "$logical_height" "$framebuffer_limit"
+}
+
+generate_preset_preview_modes() {
+    local native_width="$1"
+    local native_height="$2"
+    local framebuffer_limit="$3"
     local index
     local previous_mode=""
     local output
     local logical_resolution
-    local outputs=()
-
-    decimal_at_most "$framebuffer_limit" "$DEFAULT_FRAMEBUFFER_LIMIT" || fail "framebuffer limit must be a positive integer no greater than ${DEFAULT_FRAMEBUFFER_LIMIT}"
-    parsed_resolution="$(parse_resolution "$native_resolution")" || fail "native resolution must use positive WIDTHxHEIGHT values"
-    native_width="${parsed_resolution%%:*}"
-    native_height="${parsed_resolution##*:}"
+    local output_lines=()
 
     for ((index = 0; index < ${#PRESET_NAMES[@]}; index++)); do
         output="$(print_preview_mode \
@@ -184,12 +201,87 @@ preview() {
             continue
         fi
         previous_mode="$logical_resolution"
-        outputs+=("$output")
+        output_lines+=("$output")
     done
 
-    for output in "${outputs[@]}"; do
-        printf '%s\n' "$output"
+    printf '%s\n' "${output_lines[@]}"
+}
+
+generate_smooth_preview_modes() {
+    local native_width="$1"
+    local native_height="$2"
+    local framebuffer_limit="$3"
+    local include_near_native="$4"
+    local sample
+    local mode_name
+    local output_index
+    local smooth_divisor
+    local smooth_width_step
+    local smooth_height_step
+    local smooth_first_sample
+    local smooth_available_count
+    local smooth_mode_count
+    local smooth_sample_offset
+
+    if [[ "$include_near_native" == true ]]; then
+        ((native_height > 1)) || fail "near-native mode requires a native height greater than one"
+    fi
+    smooth_divisor="$(greatest_common_divisor "$native_width" "$native_height")" || return 1
+    smooth_width_step=$((native_width / smooth_divisor))
+    smooth_height_step=$((native_height / smooth_divisor))
+    smooth_first_sample=$(((smooth_divisor * SMOOTH_LOWER_NUMERATOR + SMOOTH_LOWER_DENOMINATOR - 1) / SMOOTH_LOWER_DENOMINATOR))
+    smooth_available_count=$((smooth_divisor - smooth_first_sample + 1))
+    ((smooth_available_count >= 2)) || fail "smooth mode set requires at least two exact-aspect-ratio candidates from 2/3 through native"
+    if ((smooth_available_count > SMOOTH_MAX_MODE_COUNT)); then
+        smooth_mode_count="$SMOOTH_MAX_MODE_COUNT"
+    else
+        smooth_mode_count="$smooth_available_count"
+    fi
+    for ((output_index = 0; output_index < smooth_mode_count; output_index++)); do
+        smooth_sample_offset=$((output_index * (smooth_available_count - 1) / (smooth_mode_count - 1)))
+        sample=$((smooth_first_sample + smooth_sample_offset))
+        if ((output_index == smooth_mode_count - 1)); then
+            mode_name="native"
+        else
+            printf -v mode_name 'smooth-%02d' "$((output_index + 1))"
+        fi
+        print_hidpi_preview_mode \
+            "$mode_name" \
+            "$((smooth_width_step * sample))" \
+            "$((smooth_height_step * sample))" \
+            "$framebuffer_limit" || return 1
     done
+    if [[ "$include_near_native" == true ]]; then
+        print_hidpi_preview_mode near-native "$native_width" "$((native_height - 1))" "$framebuffer_limit"
+    fi
+}
+
+preview() {
+    local native_resolution="$1"
+    local framebuffer_limit="$2"
+    local mode_set="${3:-$MODE_SET_PRESET}"
+    local include_near_native="${4:-false}"
+    local parsed_resolution
+    local native_width
+    local native_height
+    local preview_output
+
+    decimal_at_most "$framebuffer_limit" "$DEFAULT_FRAMEBUFFER_LIMIT" || fail "framebuffer limit must be a positive integer no greater than ${DEFAULT_FRAMEBUFFER_LIMIT}"
+    parsed_resolution="$(parse_resolution "$native_resolution")" || fail "native resolution must use positive WIDTHxHEIGHT values"
+    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
+    native_width="${parsed_resolution%%:*}"
+    native_height="${parsed_resolution##*:}"
+
+    case "$mode_set" in
+    "$MODE_SET_PRESET")
+        preview_output="$(generate_preset_preview_modes "$native_width" "$native_height" "$framebuffer_limit")" || return 1
+        ;;
+    "$MODE_SET_SMOOTH")
+        preview_output="$(generate_smooth_preview_modes "$native_width" "$native_height" "$framebuffer_limit" "$include_near_native")" || return 1
+        ;;
+    esac
+
+    printf '%s\n' "$preview_output"
 }
 
 display_name_from_edid() {
@@ -421,6 +513,10 @@ run_inventory_command() {
 run_preview_command() {
     local native_resolution=""
     local framebuffer_limit="$DEFAULT_FRAMEBUFFER_LIMIT"
+    local mode_set="$MODE_SET_PRESET"
+    local include_near_native=false
+    local mode_set_provided=false
+    local near_native_provided=false
 
     while (($# > 0)); do
         case "$1" in
@@ -434,6 +530,19 @@ run_preview_command() {
             framebuffer_limit="$2"
             shift 2
             ;;
+        --mode-set)
+            (($# >= 2)) || fail "--mode-set requires preset or smooth"
+            [[ "$mode_set_provided" == false ]] || fail "--mode-set may only be provided once"
+            mode_set="$2"
+            mode_set_provided=true
+            shift 2
+            ;;
+        --include-near-native)
+            [[ "$near_native_provided" == false ]] || fail "--include-near-native may only be provided once"
+            include_near_native=true
+            near_native_provided=true
+            shift
+            ;;
         *)
             fail "unknown preview option: $1"
             ;;
@@ -441,7 +550,7 @@ run_preview_command() {
     done
 
     [[ -n "$native_resolution" ]] || fail "--native-resolution is required"
-    preview "$native_resolution" "$framebuffer_limit"
+    preview "$native_resolution" "$framebuffer_limit" "$mode_set" "$include_near_native"
 }
 
 run_native_resolution_command() {
@@ -471,6 +580,10 @@ run_apply_command() {
     local overrides_root="$DEFAULT_OVERRIDES_ROOT"
     local state_root="$DEFAULT_STATE_ROOT"
     local confirmed=false
+    local mode_set="$MODE_SET_PRESET"
+    local include_near_native=false
+    local mode_set_provided=false
+    local near_native_provided=false
 
     while (($# > 0)); do
         case "$1" in
@@ -499,6 +612,19 @@ run_apply_command() {
             state_root="$2"
             shift 2
             ;;
+        --mode-set)
+            (($# >= 2)) || fail "--mode-set requires preset or smooth"
+            [[ "$mode_set_provided" == false ]] || fail "--mode-set may only be provided once"
+            mode_set="$2"
+            mode_set_provided=true
+            shift 2
+            ;;
+        --include-near-native)
+            [[ "$near_native_provided" == false ]] || fail "--include-near-native may only be provided once"
+            include_near_native=true
+            near_native_provided=true
+            shift
+            ;;
         --confirm)
             confirmed=true
             shift
@@ -510,7 +636,8 @@ run_apply_command() {
     done
 
     [[ -n "$vendor_id" && -n "$product_id" && -n "$native_resolution" ]] || fail "apply requires vendor id, product id, and native resolution"
-    apply_override "$vendor_id" "$product_id" "$native_resolution" "$overrides_root" "$state_root" "$confirmed"
+    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
+    apply_override "$vendor_id" "$product_id" "$native_resolution" "$overrides_root" "$state_root" "$confirmed" "$mode_set" "$include_near_native"
 }
 
 run_revert_command() {

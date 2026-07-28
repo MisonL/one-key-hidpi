@@ -40,6 +40,11 @@ menu_preview_output="$(\
     langInputChoice="Enter your choice" \
     langEnterError="Enter error" \
     langIntelSafeTitle="Intel safe HiDPI" \
+    langIntelSafeModePreset="(1) Compatibility preset modes" \
+    langIntelSafeModeSmooth="(2) Smooth HiDPI modes" \
+    langIntelSafeNearNative="Add a near-native compatibility mode?" \
+    langIntelSafeNearNativeNo="(1) No" \
+    langIntelSafeNearNativeYes="(2) Yes" \
     langIntelSafeApply="(1) Apply generated modes" \
     langIntelSafeRevert="(2) Revert generated modes" \
     langIntelSafeCancel="(3) Cancel" \
@@ -48,12 +53,36 @@ menu_preview_output="$(\
     langIntelSafeRevertConfirm="Type REVERT" \
     langIntelSafeCancelled="Cancelled" \
     langIntelSafeToolMissing="Tool is missing" \
-    /bin/bash -c 'source "$1"; printf "3\\n" | intel_safe_hidpi "$2" "$3" "$4" "$5"' bash \
+    /bin/bash -c 'source "$1"; printf "1\\n3\\n" | intel_safe_hidpi "$2" "$3" "$4" "$5"' bash \
         "$menu_library" "$tool_path" "$first_edid" 30ae 62a5
 )" || fail "preview and cancel flow should succeed"
 assert_contains "$menu_preview_output" "Intel safe HiDPI: 1920x1080"
 assert_contains "$menu_preview_output" "compact: 960x540 framebuffer=1920x1080 payload="
 assert_contains "$menu_preview_output" "Cancelled"
+
+menu_smooth_preview_output="$(\
+    langInputChoice="Enter your choice" \
+    langEnterError="Enter error" \
+    langIntelSafeTitle="Intel safe HiDPI" \
+    langIntelSafeModePreset="(1) Compatibility preset modes" \
+    langIntelSafeModeSmooth="(2) Smooth HiDPI modes" \
+    langIntelSafeNearNative="Add a near-native compatibility mode?" \
+    langIntelSafeNearNativeNo="(1) No" \
+    langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeApply="(1) Apply generated modes" \
+    langIntelSafeRevert="(2) Revert generated modes" \
+    langIntelSafeCancel="(3) Cancel" \
+    langIntelSafeRoot="Run this script as root" \
+    langIntelSafeApplyConfirm="Type APPLY" \
+    langIntelSafeRevertConfirm="Type REVERT" \
+    langIntelSafeCancelled="Cancelled" \
+    langIntelSafeToolMissing="Tool is missing" \
+    /bin/bash -c 'source "$1"; printf "2\\n2\\n3\\n" | intel_safe_hidpi "$2" "$3" "$4" "$5"' bash \
+        "$menu_library" "$tool_path" "$first_edid" 30ae 62a5
+)" || fail "smooth preview and cancel flow should succeed"
+assert_contains "$menu_smooth_preview_output" "smooth-01: 1280x720 framebuffer=2560x1440 payload="
+assert_contains "$menu_smooth_preview_output" "near-native: 1920x1079 framebuffer=3840x2158 payload="
+assert_contains "$menu_smooth_preview_output" "Cancelled"
 
 menu_definition="$(/bin/bash -c 'source "$1"; declare -f intel_safe_hidpi' bash "$menu_library")"
 if printf '%s\n' "$menu_definition" | /usr/bin/grep -Fq "sudo"; then
@@ -64,12 +93,62 @@ entrypoint_trace="$(mktemp "${TMPDIR:-/tmp}/one-key-hidpi-menu.XXXXXX")" || fail
 standalone_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-standalone.XXXXXX")" || fail "could not create standalone fixture"
 standalone_script="${standalone_dir}/hidpi.sh"
 remote_source_marker="${standalone_dir}/remote-source-marker"
+menu_tool_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-menu-tool.XXXXXX")" || fail "could not create menu tool fixture"
+menu_tool_path="${menu_tool_dir}/intel-hidpi.sh"
+menu_tool_trace="${menu_tool_dir}/trace"
 
 cleanup() {
     /bin/rm -f "$entrypoint_trace"
     /bin/rm -rf "$standalone_dir"
+    /bin/rm -rf "$menu_tool_dir"
 }
 trap cleanup EXIT
+
+# shellcheck disable=SC2016
+printf '%s\n' \
+    '#!/bin/bash' \
+    'printf "%s\n" "$*" >> "$MENU_TOOL_TRACE"' \
+    'case "$1" in' \
+    'native-resolution)' \
+    '    printf "1920x1080\n"' \
+    '    ;;' \
+    'preview)' \
+    '    printf "preview fixture\n"' \
+    '    ;;' \
+    'apply)' \
+    '    printf "apply fixture\n"' \
+    '    ;;' \
+    '*)' \
+    '    exit 1' \
+    '    ;;' \
+    'esac' > "$menu_tool_path" || fail "could not write menu tool fixture"
+/bin/chmod +x "$menu_tool_path" || fail "could not make menu tool fixture executable"
+
+menu_apply_output="$(
+    MENU_TOOL_TRACE="$menu_tool_trace" \
+    langInputChoice="Enter your choice" \
+    langEnterError="Enter error" \
+    langIntelSafeTitle="Intel safe HiDPI" \
+    langIntelSafeModePreset="(1) Compatibility preset modes" \
+    langIntelSafeModeSmooth="(2) Smooth HiDPI modes" \
+    langIntelSafeNearNative="Add a near-native compatibility mode?" \
+    langIntelSafeNearNativeNo="(1) No" \
+    langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeApply="(1) Apply generated modes" \
+    langIntelSafeRevert="(2) Revert generated modes" \
+    langIntelSafeCancel="(3) Cancel" \
+    langIntelSafeRoot="Run this script as root" \
+    langIntelSafeApplyConfirm="Type APPLY" \
+    langIntelSafeRevertConfirm="Type REVERT" \
+    langIntelSafeCancelled="Cancelled" \
+    langIntelSafeToolMissing="Tool is missing" \
+    /bin/bash -c 'source "$1"; intel_safe_hidpi_has_root_privilege() { return 0; }; printf "2\\n2\\n1\\nAPPLY\\n" | intel_safe_hidpi "$2" test-edid 30ae 62a5' bash \
+        "$menu_library" "$menu_tool_path"
+)" || fail "smooth apply forwarding fixture should succeed"
+assert_contains "$menu_apply_output" "apply fixture"
+menu_tool_calls="$(/bin/cat "$menu_tool_trace")" || fail "could not read menu tool trace"
+assert_contains "$menu_tool_calls" "preview --native-resolution 1920x1080 --mode-set smooth --include-near-native"
+assert_contains "$menu_tool_calls" "apply --vendor-id 30ae --product-id 62a5 --native-resolution 1920x1080 --mode-set smooth --include-near-native --confirm"
 
 if ! /bin/bash -c '
     source "$1"
@@ -257,6 +336,11 @@ if ((EUID != 0)); then
         langInputChoice="Enter your choice" \
         langEnterError="Enter error" \
         langIntelSafeTitle="Intel safe HiDPI" \
+        langIntelSafeModePreset="(1) Compatibility preset modes" \
+        langIntelSafeModeSmooth="(2) Smooth HiDPI modes" \
+        langIntelSafeNearNative="Add a near-native compatibility mode?" \
+        langIntelSafeNearNativeNo="(1) No" \
+        langIntelSafeNearNativeYes="(2) Yes" \
         langIntelSafeApply="(1) Apply generated modes" \
         langIntelSafeRevert="(2) Revert generated modes" \
         langIntelSafeCancel="(3) Cancel" \
@@ -265,7 +349,7 @@ if ((EUID != 0)); then
         langIntelSafeRevertConfirm="Type REVERT" \
         langIntelSafeCancelled="Cancelled" \
         langIntelSafeToolMissing="Tool is missing" \
-        /bin/bash -c 'source "$1"; printf "1\\n" | intel_safe_hidpi "$2" "$3" "$4" "$5"' bash \
+        /bin/bash -c 'source "$1"; printf "1\\n1\\n" | intel_safe_hidpi "$2" "$3" "$4" "$5"' bash \
             "$menu_library" "$tool_path" "$first_edid" 30ae 62a5
     )"; then
         fail "non-root apply selection must fail explicitly"

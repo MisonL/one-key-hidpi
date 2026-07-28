@@ -55,6 +55,31 @@ override、修改分辨率或重载显示服务。实时 CoreGraphics 采集会�
 状态。该文件必须是小于等于 1 MiB 的普通文本捕获记录，符号链接会被拒绝。
 每个选项只能提供一次，重复传入会显式失败。
 
+### 平滑 HiDPI 模式
+
+本地 Intel 安全菜单可选择原有的兼容预设模式，或显式选择 `smooth` 平滑模式集。
+`smooth` 会从不低于面板原生逻辑尺寸 2/3 的位置到原生尺寸生成保持精确宽高比的 2x HiDPI
+模式，最多 41 档。对 1920x1080 面板，这对应从 1280x720 到 1920x1080 的 41 档
+模式，步进为 16x9。根据目标面板需要，还可以明确追加 `1920x1079` 的近原生兼容档。
+
+命令行也可使用相同模式集：
+
+```bash
+./intel-hidpi.sh preview --native-resolution 1920x1080 --mode-set smooth \
+  --include-near-native
+
+./intel-hidpi.sh verify-modes --vendor-id <供应商ID> --product-id <产品ID> \
+  --native-resolution 1920x1080 --mode-set smooth --include-near-native
+```
+
+`preview`、`apply` 与 `verify-modes` 默认仍使用 `preset`。`--include-near-native`
+只能与 `--mode-set smooth` 同时使用。若面板无法在该范围内提供至少两个保持精确宽高比
+的候选档位，命令会显式失败，不会静默退化为单一模式。这个基于 EDID override 的模式
+生成器并不等同于 BetterDisplay 的 GUI 或实时显示器重配置能力。
+
+将预览结果应用到 override 时，`apply` 必须复用预览所用的 `--mode-set` 与
+`--include-near-native` 参数；不同参数会有意生成不同的候选模式集。
+
 ![运行](./img/run-zh.jpg)
 
 ## 恢复

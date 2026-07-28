@@ -942,7 +942,6 @@ fi
 
 failed_target_vendor_dir="${overrides_root}/DisplayVendorID-1"
 failed_target_state_vendor_dir="${state_root}/DisplayVendorID-1"
-failed_target_state_dir="${failed_target_state_vendor_dir}/DisplayProductID-1"
 if "${repo_dir}/intel-hidpi.sh" apply \
     --vendor-id 1 \
     --product-id 1 \
@@ -952,8 +951,8 @@ if "${repo_dir}/intel-hidpi.sh" apply \
     --confirm >/dev/null 2>&1; then
     fail "invalid apply to a new target must fail explicitly"
 fi
-assert_directory_empty "$failed_target_vendor_dir"
-assert_directory_empty "$failed_target_state_dir"
+assert_directory_absent "$failed_target_vendor_dir"
+assert_directory_absent "$failed_target_state_vendor_dir"
 
 overflow_resolution="18446744073709555456x18446744073709553776"
 if "${repo_dir}/intel-hidpi.sh" apply \
@@ -965,8 +964,8 @@ if "${repo_dir}/intel-hidpi.sh" apply \
     --confirm >/dev/null 2>&1; then
     fail "overflowing apply resolution must fail explicitly"
 fi
-assert_directory_empty "${overrides_root}/DisplayVendorID-1"
-assert_directory_empty "${state_root}/DisplayVendorID-1/DisplayProductID-1"
+assert_directory_absent "${overrides_root}/DisplayVendorID-1"
+assert_directory_absent "${state_root}/DisplayVendorID-1"
 assert_directory_absent "${state_root}/DisplayVendorID-1/DisplayProductID-2"
 
 /bin/ln -s "$outside_dir" "${overrides_root}/DisplayVendorID-dead"

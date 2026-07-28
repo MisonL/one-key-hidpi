@@ -11,6 +11,8 @@ PLIST_OPERATION_HASH=""
 PLIST_OPERATION_IDENTITY=""
 
 INTEL_HIDPI_STORAGE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+# shellcheck source=lib/intel_hidpi_mode_configuration.sh
+source "${INTEL_HIDPI_STORAGE_LIB_DIR}/intel_hidpi_mode_configuration.sh" || return 1
 # shellcheck source=lib/intel_hidpi_darwin_fs.sh
 source "${INTEL_HIDPI_STORAGE_LIB_DIR}/intel_hidpi_darwin_fs.sh" || return 1
 # shellcheck source=lib/intel_hidpi_manifest.sh
@@ -533,9 +535,11 @@ verified_scale_payloads_from_override() {
 payloads_for_resolution() {
     local native_resolution="$1"
     local framebuffer_limit="$2"
+    local mode_set="${3:-$MODE_SET_PRESET}"
+    local include_near_native="${4:-false}"
     local preview_output
 
-    preview_output="$(preview "$native_resolution" "$framebuffer_limit")" || return 1
+    preview_output="$(preview "$native_resolution" "$framebuffer_limit" "$mode_set" "$include_near_native")" || return 1
     printf '%s\n' "$preview_output" | /usr/bin/sed -n 's/.* payload=\([A-Za-z0-9+\/]*=*\)$/\1/p'
 }
 
@@ -558,18 +562,16 @@ ensure_scale_resolutions_array() {
 
 append_missing_payloads() {
     local candidate_path="$1"
-    local native_resolution="$2"
-    local framebuffer_limit="$3"
-    local expected_hash="$4"
-    local expected_identity="$5"
+    local generated_payloads="$2"
+    local expected_hash="$3"
+    local expected_identity="$4"
     local payload
-    local generated_payloads
     local existing_payloads
     local payload_count
     local current_hash="$expected_hash"
     local current_identity="$expected_identity"
 
-    generated_payloads="$(payloads_for_resolution "$native_resolution" "$framebuffer_limit")" || return 1
+    [[ -n "$generated_payloads" ]] || return 1
     ensure_scale_resolutions_array "$candidate_path" "$current_hash" "$current_identity" || return 1
     current_hash="$PLIST_OPERATION_HASH"
     current_identity="$PLIST_OPERATION_IDENTITY"
