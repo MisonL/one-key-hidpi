@@ -38,6 +38,23 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/xzhih/one-key-hidpi/mast
 身份运行并输入明确确认词。修改 override 后仍需让 macOS 重载显示器配置，通常
 需要重启，系统才会显示新模式。
 
+### 只读模式验收
+
+在 macOS 已暴露显示器配置后，应按目标显示器验收，而不能只看主显示器或 plist：
+
+```bash
+./intel-hidpi.sh verify-modes --vendor-id <供应商ID> --product-id <产品ID> \
+  --native-resolution <宽>x<高>
+```
+
+该命令按供应商 ID 与产品 ID 读取目标显示器，并同时比对每个生成候选的逻辑分辨率
+和 framebuffer。全部观察到时返回 `0`；只观察到部分时返回 `2`；它不会写入
+override、修改分辨率或重载显示服务。实时 CoreGraphics 采集会输出
+`capture-source=live-coregraphics`。使用 `--modes-file` 时会输出
+`capture-source=offline-file`；这种模式只验证传入的捕获记录，不能证明当前显示器
+状态。该文件必须是小于等于 1 MiB 的普通文本捕获记录，符号链接会被拒绝。
+每个选项只能提供一次，重复传入会显式失败。
+
 ![运行](./img/run-zh.jpg)
 
 ## 恢复

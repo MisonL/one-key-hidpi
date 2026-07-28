@@ -7,6 +7,8 @@ readonly DEFAULT_OVERRIDES_ROOT="/Library/Displays/Contents/Resources/Overrides"
 readonly DEFAULT_STATE_ROOT="/Library/Application Support/one-key-hidpi"
 readonly DEFAULT_FRAMEBUFFER_LIMIT=8192
 readonly MAX_NATIVE_DIMENSION=$((DEFAULT_FRAMEBUFFER_LIMIT / 2))
+readonly MAX_RUNTIME_MODE_DIMENSION=9999999999
+readonly MAX_OFFLINE_MODE_CAPTURE_BYTES=1048576
 readonly PRESET_NAMES=("compact" "balanced" "spacious" "dense" "native")
 readonly PRESET_NUMERATORS=(1 3 2 3 1)
 readonly PRESET_DENOMINATORS=(2 5 3 4 1)
@@ -17,6 +19,7 @@ Usage:
   intel-hidpi.sh inventory [--ioreg-file PATH] [--overrides-root PATH]
   intel-hidpi.sh native-resolution --edid HEX
   intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS]
+  intel-hidpi.sh verify-modes --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--modes-file PATH]
   intel-hidpi.sh apply --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--overrides-root PATH] [--state-root PATH] --confirm
   intel-hidpi.sh revert --vendor-id HEX --product-id HEX [--overrides-root PATH] [--state-root PATH] [--migrate-v4] --confirm
 
@@ -25,6 +28,8 @@ Commands:
              existing EDID override modes. This command never writes files.
   native-resolution  Read one EDID and print its preferred panel resolution.
   preview    Generate candidate 2x HiDPI modes without writing an override.
+  verify-modes  Read modes for exactly one connected display and report whether
+                every generated candidate is exposed with its 2x framebuffer.
   apply      Merge generated modes into one target override after confirmation.
   revert     Restore or remove only the target override recorded by apply.
              Legacy v4 state requires the explicit --migrate-v4 acknowledgment.
@@ -117,6 +122,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || fail "could not re
 readonly SCRIPT_DIR
 # shellcheck source=lib/intel_hidpi_storage.sh
 source "${SCRIPT_DIR}/lib/intel_hidpi_storage.sh" || fail "could not load Intel HiDPI storage helpers"
+# shellcheck source=lib/intel_hidpi_verify_modes.sh
+source "${SCRIPT_DIR}/lib/intel_hidpi_verify_modes.sh" || fail "could not load Intel HiDPI runtime verification helpers"
 
 print_preview_mode() {
     local name="$1"
@@ -565,6 +572,10 @@ main() {
     preview)
         shift
         run_preview_command "$@"
+        ;;
+    verify-modes)
+        shift
+        run_verify_modes_command "$@"
         ;;
     native-resolution)
         shift

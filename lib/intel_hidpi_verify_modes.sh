@@ -1,0 +1,262 @@
+runtime_resolution_is_valid() {
+    local resolution="$1"
+    local maximum_dimension="$2"
+    local width
+    local height
+
+    [[ "$resolution" =~ ^([1-9][0-9]*)x([1-9][0-9]*)$ ]] || return 1
+    width="${BASH_REMATCH[1]}"
+    height="${BASH_REMATCH[2]}"
+    decimal_at_most "$width" "$maximum_dimension" || return 1
+    decimal_at_most "$height" "$maximum_dimension"
+}
+
+capture_runtime_modes() {
+    local vendor_id="$1"
+    local product_id="$2"
+    local runtime_source="${SCRIPT_DIR}/lib/intel_hidpi_runtime_modes.swift"
+
+    [[ -f "$runtime_source" && ! -L "$runtime_source" ]] || return 1
+    [[ -x /usr/bin/swift ]] || return 1
+    /usr/bin/swift "$runtime_source" --vendor-id "$vendor_id" --product-id "$product_id"
+}
+
+read_offline_mode_capture() {
+    local modes_file="$1"
+    local maximum_bytes="$2"
+
+    # shellcheck disable=SC2016
+    /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/perl -MFcntl=:DEFAULT -e '
+        my ($path, $maximum_bytes) = @ARGV;
+        exit 1 unless defined $maximum_bytes && $maximum_bytes =~ /\A[1-9][0-9]*\z/;
+        sysopen(my $handle, $path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) or exit 1;
+        -f $handle or exit 1;
+
+        my $capture = q{};
+        while (1) {
+            my $read = read($handle, my $chunk, 64 * 1024);
+            exit 1 unless defined $read;
+            last if $read == 0;
+            exit 1 if $chunk =~ /\0/;
+            exit 2 if length($capture) + $read > $maximum_bytes;
+            $capture .= $chunk;
+        }
+        print $capture;
+    ' "$modes_file" "$maximum_bytes"
+}
+
+parse_runtime_mode_capture() {
+    local capture="$1"
+    local expected_vendor_id="$2"
+    local expected_product_id="$3"
+    local line
+    local vendor_value
+    local product_value
+    local captured_vendor_id
+    local captured_product_id
+    local logical_resolution
+    local pixel_resolution
+    local refresh_value
+    local flags_value
+    local target_seen=false
+    local mode_seen=false
+
+    RUNTIME_MODE_PAIRS=""
+    [[ -n "$capture" ]] || return 1
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+        target\|*)
+            [[ "$target_seen" == false ]] || return 1
+            [[ "$line" =~ ^target\|vendor-id=([^|]+)\|product-id=([^|]+)$ ]] || return 1
+            vendor_value="${BASH_REMATCH[1]}"
+            product_value="${BASH_REMATCH[2]}"
+            captured_vendor_id="$(normalize_hex_id "$vendor_value")" || return 1
+            captured_product_id="$(normalize_hex_id "$product_value")" || return 1
+            [[ "$captured_vendor_id" == "$expected_vendor_id" && "$captured_product_id" == "$expected_product_id" ]] || return 2
+            target_seen=true
+            ;;
+        mode\|*)
+            [[ "$target_seen" == true ]] || return 1
+            [[ "$line" =~ ^mode\|logical=([^|]+)\|pixels=([^|]+)\|refresh=([^|]+)\|flags=([^|]+)$ ]] || return 1
+            logical_resolution="${BASH_REMATCH[1]}"
+            pixel_resolution="${BASH_REMATCH[2]}"
+            refresh_value="${BASH_REMATCH[3]}"
+            flags_value="${BASH_REMATCH[4]}"
+            runtime_resolution_is_valid "$logical_resolution" "$MAX_RUNTIME_MODE_DIMENSION" || return 1
+            runtime_resolution_is_valid "$pixel_resolution" "$MAX_RUNTIME_MODE_DIMENSION" || return 1
+            [[ "$refresh_value" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+            [[ "$flags_value" =~ ^[0-9]+$ ]] || return 1
+            RUNTIME_MODE_PAIRS="${RUNTIME_MODE_PAIRS}${RUNTIME_MODE_PAIRS:+$'\n'}${logical_resolution}|${pixel_resolution}"
+            mode_seen=true
+            ;;
+        *)
+            return 1
+            ;;
+        esac
+    done <<< "$capture"
+
+    [[ "$target_seen" == true && "$mode_seen" == true ]]
+}
+
+collect_generated_mode_records() {
+    local native_resolution="$1"
+    local preview_output
+    local line
+    local name
+    local logical_resolution
+    local framebuffer_resolution
+    local payload
+
+    GENERATED_MODE_RECORDS=""
+    preview_output="$(preview "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT")" || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^([a-z]+):\ ([1-9][0-9]*x[1-9][0-9]*)\ framebuffer=([1-9][0-9]*x[1-9][0-9]*)\ payload=([A-Za-z0-9+/]+={0,2})$ ]] || return 1
+        name="${BASH_REMATCH[1]}"
+        logical_resolution="${BASH_REMATCH[2]}"
+        framebuffer_resolution="${BASH_REMATCH[3]}"
+        payload="${BASH_REMATCH[4]}"
+        runtime_resolution_is_valid "$logical_resolution" "$MAX_NATIVE_DIMENSION" || return 1
+        runtime_resolution_is_valid "$framebuffer_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" || return 1
+        [[ -n "$payload" ]] || return 1
+        GENERATED_MODE_RECORDS="${GENERATED_MODE_RECORDS}${GENERATED_MODE_RECORDS:+$'\n'}${name}|${logical_resolution}|${framebuffer_resolution}"
+    done <<< "$preview_output"
+
+    [[ -n "$GENERATED_MODE_RECORDS" ]]
+}
+
+verify_mode_capture() {
+    local vendor_id="$1"
+    local product_id="$2"
+    local native_resolution="$3"
+    local capture="$4"
+    local capture_source="$5"
+    local capture_status=0
+    local name
+    local logical_resolution
+    local framebuffer_resolution
+    local observed_count=0
+    local missing_count=0
+
+    case "$capture_source" in
+    live-coregraphics|offline-file)
+        ;;
+    *)
+        fail "runtime mode capture source is invalid"
+        ;;
+    esac
+
+    collect_generated_mode_records "$native_resolution" || fail "could not generate runtime verification candidates"
+    parse_runtime_mode_capture "$capture" "$vendor_id" "$product_id" || capture_status=$?
+    case "$capture_status" in
+    0)
+        ;;
+    1)
+        fail "runtime mode capture is invalid"
+        ;;
+    2)
+        fail "runtime mode target does not match requested display"
+        ;;
+    *)
+        fail "could not parse runtime mode capture"
+        ;;
+    esac
+
+    printf 'capture-source=%s\n' "$capture_source"
+    printf 'target=%s:%s\n' "$vendor_id" "$product_id"
+    while IFS='|' read -r name logical_resolution framebuffer_resolution; do
+        if printf '%s\n' "$RUNTIME_MODE_PAIRS" | /usr/bin/grep -Fqx "${logical_resolution}|${framebuffer_resolution}"; then
+            printf '%s: %s framebuffer=%s status=observed\n' "$name" "$logical_resolution" "$framebuffer_resolution"
+            observed_count=$((observed_count + 1))
+        else
+            printf '%s: %s framebuffer=%s status=missing\n' "$name" "$logical_resolution" "$framebuffer_resolution"
+            missing_count=$((missing_count + 1))
+        fi
+    done <<< "$GENERATED_MODE_RECORDS"
+
+    if ((missing_count == 0)); then
+        printf 'verification=complete observed=%s missing=0\n' "$observed_count"
+        return 0
+    fi
+
+    printf 'verification=partial observed=%s missing=%s\n' "$observed_count" "$missing_count"
+    return 2
+}
+
+run_verify_modes_command() {
+    local vendor_id=""
+    local product_id=""
+    local native_resolution=""
+    local modes_file=""
+    local vendor_id_provided=false
+    local product_id_provided=false
+    local native_resolution_provided=false
+    local modes_file_provided=false
+    local capture
+    local capture_source="live-coregraphics"
+    local capture_status=0
+
+    while (($# > 0)); do
+        case "$1" in
+        --vendor-id)
+            (($# >= 2)) || fail "--vendor-id requires a hexadecimal value"
+            [[ "$vendor_id_provided" == false ]] || fail "--vendor-id may only be provided once"
+            vendor_id="$2"
+            vendor_id_provided=true
+            shift 2
+            ;;
+        --product-id)
+            (($# >= 2)) || fail "--product-id requires a hexadecimal value"
+            [[ "$product_id_provided" == false ]] || fail "--product-id may only be provided once"
+            product_id="$2"
+            product_id_provided=true
+            shift 2
+            ;;
+        --native-resolution)
+            (($# >= 2)) || fail "--native-resolution requires WIDTHxHEIGHT"
+            [[ "$native_resolution_provided" == false ]] || fail "--native-resolution may only be provided once"
+            native_resolution="$2"
+            native_resolution_provided=true
+            shift 2
+            ;;
+        --modes-file)
+            (($# >= 2)) || fail "--modes-file requires a regular file path"
+            [[ "$modes_file_provided" == false ]] || fail "--modes-file may only be provided once"
+            modes_file="$2"
+            modes_file_provided=true
+            shift 2
+            ;;
+        *)
+            fail "unknown verify-modes option: $1"
+            ;;
+        esac
+    done
+
+    [[ -n "$vendor_id" && -n "$product_id" && -n "$native_resolution" ]] || fail "verify-modes requires vendor id, product id, and native resolution"
+    vendor_id="$(normalize_hex_id "$vendor_id")" || fail "vendor id is invalid"
+    product_id="$(normalize_hex_id "$product_id")" || fail "product id is invalid"
+    parse_resolution "$native_resolution" >/dev/null || fail "native resolution must use positive WIDTHxHEIGHT values"
+
+    if [[ "$modes_file_provided" == true ]]; then
+        [[ -n "$modes_file" ]] || fail "--modes-file requires a regular file path"
+        capture="$(read_offline_mode_capture "$modes_file" "$MAX_OFFLINE_MODE_CAPTURE_BYTES")" || capture_status=$?
+        case "$capture_status" in
+        0)
+            ;;
+        1)
+            fail "modes file must be a regular non-symbolic-link text file"
+            ;;
+        2)
+            fail "modes file exceeds ${MAX_OFFLINE_MODE_CAPTURE_BYTES} bytes"
+            ;;
+        *)
+            fail "could not read modes file"
+            ;;
+        esac
+        capture_source="offline-file"
+    else
+        capture="$(capture_runtime_modes "$vendor_id" "$product_id")" || fail "could not capture target display modes"
+    fi
+
+    verify_mode_capture "$vendor_id" "$product_id" "$native_resolution" "$capture" "$capture_source"
+}

@@ -38,6 +38,27 @@ EDID. Applying or reverting requires an explicit root invocation and typed
 confirmation. A display configuration reload, normally a reboot, is still
 required before macOS exposes changed override modes.
 
+### Read-only mode verification
+
+After macOS has exposed a display configuration, verify the exact display
+rather than relying on the main display or a plist alone:
+
+```bash
+./intel-hidpi.sh verify-modes --vendor-id <vendor-id> --product-id <product-id> \
+  --native-resolution <width>x<height>
+```
+
+The command reads the display selected by vendor and product ID, and compares
+both its logical resolution and framebuffer for every generated candidate. It
+exits `0` only when all candidates are observed, exits `2` for a partial
+result, and never writes an override, changes a resolution, or reloads a
+display service. The output labels live CoreGraphics captures as
+`capture-source=live-coregraphics`. With `--modes-file`, it labels the result
+`capture-source=offline-file`; that mode validates the supplied capture only
+and is not evidence of the current display state. The file must be a regular
+text capture no larger than 1 MiB; symbolic links are rejected. Each option
+may be supplied only once; duplicates fail explicitly.
+
 ![RUN](./img/run.jpg)
 
 ## Recovery
