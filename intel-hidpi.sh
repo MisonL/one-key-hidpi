@@ -14,7 +14,7 @@ readonly PRESET_NUMERATORS=(1 3 2 3 1)
 readonly PRESET_DENOMINATORS=(2 5 3 4 1)
 
 usage() {
-    cat <<'EOF'
+    /bin/cat <<'EOF'
 Usage:
   intel-hidpi.sh inventory [--ioreg-file PATH] [--overrides-root PATH]
   intel-hidpi.sh native-resolution --edid HEX
@@ -40,6 +40,8 @@ fail() {
     printf 'error: %s\n' "$1" >&2
     exit 1
 }
+
+[[ ! -L "${BASH_SOURCE[0]}" ]] || fail "Intel HiDPI requires a regular local checkout entrypoint"
 
 decimal_from_hex() {
     local value="$1"
@@ -132,8 +134,29 @@ hidpi_payload() {
         /usr/bin/tr -d '\n'
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || fail "could not resolve script directory"
+SCRIPT_DIR="$(builtin cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && /bin/pwd)" || fail "could not resolve script directory"
 readonly SCRIPT_DIR
+
+require_complete_local_checkout() {
+    local required_path
+
+    [[ -d "${SCRIPT_DIR}/lib" && ! -L "${SCRIPT_DIR}/lib" ]] ||
+        fail "Intel HiDPI requires a complete local checkout"
+
+    for required_path in \
+        "${SCRIPT_DIR}/lib/intel_hidpi_storage.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_storage_support.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_mode_configuration.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_darwin_fs.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_manifest.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_verify_modes.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_runtime_modes.swift"; do
+        [[ -f "$required_path" && ! -L "$required_path" && -r "$required_path" ]] ||
+            fail "Intel HiDPI requires a complete local checkout"
+    done
+}
+
+require_complete_local_checkout
 # shellcheck source=lib/intel_hidpi_storage.sh
 source "${SCRIPT_DIR}/lib/intel_hidpi_storage.sh" || fail "could not load Intel HiDPI storage helpers"
 # shellcheck source=lib/intel_hidpi_verify_modes.sh
@@ -466,7 +489,7 @@ inventory() {
         [[ -f "$ioreg_file" ]] || fail "ioreg fixture does not exist: ${ioreg_file}"
         edid_source="$(/bin/cat "$ioreg_file")"
     else
-        edid_source="$(ioreg -lw0)" || fail "unable to read IODisplayEDID from ioreg"
+        edid_source="$(/usr/sbin/ioreg -lw0)" || fail "unable to read IODisplayEDID from ioreg"
     fi
 
     while IFS= read -r edid; do

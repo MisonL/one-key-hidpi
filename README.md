@@ -1,163 +1,109 @@
-# Enable macOS HiDPI
-
-## Explanation
+# Intel HiDPI for macOS
 
 [English](README.md) | [中文](README-zh.md)
 
- This script can simulate macOS HiDPI on a non-retina display, and have a "Native" Scaled in System Preferences.
+This fork supports one Intel-safe HiDPI workflow. It reads a connected
+display's EDID, generates a bounded set of 2x HiDPI candidates, and can merge
+those candidates into the display's override only after explicit confirmation.
+It is not a replacement for BetterDisplay's flexible live scaling or GUI.
 
-Some device have wake-up issue, script's second option may help, it inject a patched EDID, but another problem may exists here.
+## Requirements
 
-Logo scaling up may not be resolved, cuz the higher resolution is faked.
+- Use a complete local checkout. The repository root must contain `hidpi.sh`,
+  `intel-hidpi.sh`, and the complete `lib/` directory.
+- Use a connected display that exposes a valid EDID through `ioreg`.
+- Do not use a downloaded single script. The safe entrypoint refuses an
+  incomplete checkout instead of looking for helper files elsewhere.
+- The entrypoint and direct Intel tool reject symbolic links for their helper
+  files and `lib/` directory, so they do not load a dependency from another
+  location.
 
-System Preferences
+When more than one valid display record is present, the entrypoint prints its
+vendor ID, product ID, and native resolution and requires an explicit choice.
+The EDID, identifiers, and native resolution are kept in one record. Different
+EDIDs that map to the same override target are rejected because that target
+cannot be selected safely.
 
-![Preferences](./img/preferences.jpg)
+## Inventory
 
-![Preferences](./img/hidpi.gif)
-
-## Usage
-
-1.Remote Mode: Run this script in Terminal
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/xzhih/one-key-hidpi/master/hidpi.sh)"
-```
-
-2.Local Mode: Download ZIP, decompressing it, and double click `hidpi.command` to run
-
-### Intel safe HiDPI menu
-
-The `Intel safe HiDPI` menu is available only from a complete local checkout
-that includes `intel-hidpi.sh` and `lib/intel_hidpi_menu.sh`. The single-file
-remote command above keeps the original menu options and does not load local
-helper files from the current directory.
-
-The local menu first previews bounded modes derived from the selected display
-EDID. Applying or reverting requires an explicit root invocation and typed
-confirmation. A display configuration reload, normally a reboot, is still
-required before macOS exposes changed override modes.
-
-### Read-only mode verification
-
-After macOS has exposed a display configuration, verify the exact display
-rather than relying on the main display or a plist alone:
+Inspect EDID-derived metadata and existing override modes without writing a
+file:
 
 ```bash
-./intel-hidpi.sh verify-modes --vendor-id <vendor-id> --product-id <product-id> \
-  --native-resolution <width>x<height>
+./intel-hidpi.sh inventory
 ```
 
-The command reads the display selected by vendor and product ID, and compares
-both its logical resolution and framebuffer for every generated candidate. It
-exits `0` only when all candidates are observed, exits `2` for a partial
-result, and never writes an override, changes a resolution, or reloads a
-display service. The output labels live CoreGraphics captures as
-`capture-source=live-coregraphics`. With `--modes-file`, it labels the result
-`capture-source=offline-file`; that mode validates the supplied capture only
-and is not evidence of the current display state. The file must be a regular
-text capture no larger than 1 MiB; symbolic links are rejected. Each option
-may be supplied only once; duplicates fail explicitly.
+The command reports valid display records, their native resolutions, and the
+matching override path. It fails explicitly when no valid EDID is available.
 
-### Smooth HiDPI modes
+## Interactive Entry Point
 
-The local Intel safe menu lets you choose the existing compatibility preset or
-the explicit `smooth` set. `smooth` generates exact-aspect-ratio 2x HiDPI
-logical modes from no less than two-thirds of the native panel size through
-native size, with at most 41 candidates. On a 1920x1080 panel this is 41 modes from
-1280x720 through 1920x1080 in 16x9 steps. You can explicitly add the
-`1920x1079` near-native compatibility mode when it is appropriate for the
-target panel.
+Preview generated modes and cancel without changing an override:
 
-The same selection is available from the CLI:
+```bash
+./hidpi.sh
+```
+
+The local menu offers `preset` compatibility modes and a denser `smooth` mode
+set. `smooth` uses the native display aspect ratio from two-thirds of native
+through native size, with no more than 41 candidates. You may explicitly add a
+near-native compatibility mode when it is appropriate for the selected panel.
+When applying a previewed selection, pass the same `--mode-set` and
+`--include-near-native` options to `apply`; a different selection intentionally
+produces a different candidate set.
+
+Applying or reverting requires a root invocation and the exact `APPLY` or
+`REVERT` confirmation word:
+
+```bash
+sudo ./hidpi.sh
+```
+
+The menu does not elevate privileges by itself. It never falls back to the
+removed direct generator, remote download, or broad cleanup paths.
+
+## Command Line
+
+Generate candidates without writing an override:
 
 ```bash
 ./intel-hidpi.sh preview --native-resolution 1920x1080 --mode-set smooth \
   --include-near-native
-
-./intel-hidpi.sh verify-modes --vendor-id <vendor-id> --product-id <product-id> \
-  --native-resolution 1920x1080 --mode-set smooth --include-near-native
 ```
 
-`preset` remains the default for `preview`, `apply`, and `verify-modes`.
-`--include-near-native` is valid only with `--mode-set smooth`. A panel that
-cannot provide at least two exact-aspect-ratio candidates in that range fails
-explicitly rather than silently falling back to one mode. This EDID override
-mode generator is not a replacement for BetterDisplay's GUI or its live
-display reconfiguration behavior.
+After macOS exposes the selected display's modes, verify the exact target in a
+read-only operation:
 
-When applying a previewed selection, pass the same `--mode-set` and
-`--include-near-native` options to `apply`; different options deliberately
-produce a different candidate set.
+```bash
+./intel-hidpi.sh verify-modes --vendor-id <vendor-id> --product-id <product-id> \
+  --native-resolution <width>x<height> --mode-set smooth --include-near-native
+```
 
-![RUN](./img/run.jpg)
+`verify-modes` compares both logical dimensions and the required 2x
+framebuffer. It returns `0` for a complete result and `2` when some generated
+modes are missing. With `--modes-file`, it validates an offline capture only;
+that result is not evidence of the current display state.
 
 ## Recovery
 
-### Normal
-
-In the legacy menu, choose option 3 and then "Disable HIDPI on this monitor".
-That path removes only the selected display's `DisplayProductID-<product ID>`
-override and its icon attachments, and keeps other displays from the same
-vendor.
-
-For the `Intel safe HiDPI` menu in a complete local checkout, rerun the local
-script as root and choose Revert, or run this from the checkout:
+Revert only an override previously recorded by this tool for the selected
+vendor and product ID:
 
 ```bash
 sudo ./intel-hidpi.sh revert --vendor-id <vendor-id> --product-id <product-id> --confirm
 ```
 
-The command reverts only the override recorded by this tool for that display.
-It stops explicitly when the manifest is missing, the target changed outside
-the tool, or the override root does not match.
+The command checks its manifest, target content, and override root before it
+restores or removes anything. It stops when the recorded state is missing or
+has changed outside the tool.
 
-### Recovery mode
+## Limits
 
-If you cant boot into system, or get any another issues, you can boot into macOS Recovery mode, and use the Terminal.app
+EDID override behavior depends on the display, graphics driver, and macOS.
+Deterministic preview and fixture validation do not prove that a particular
+Intel Hackintosh configuration will expose every candidate at runtime.
 
-There are two ways to close it. It is recommended to choose the first one
-
-1. 
-
-```bash
-ls /Volumes/
-```
-
-you can see all Disk.
-
-```bash
-cd /Volumes/"Your System Disk Part"/Users/
-
-ls
-```
-
-you can see user home directory.
-
-```bash
-cd "user name"
-
-./.hidpi-disable
-```
-
-Run `.hidpi-disable` directly, not through a symbolic link or hard link. It
-must be under `Users/<user>/` on the intended system volume. It can be run
-from any current directory, but it removes only the selected display's
-override and icon attachments from the volume containing the script. A
-standalone copy or move placed under another valid `<volume>/Users/<user>/`
-layout targets that other volume, so do not copy or move it unless that is
-intentional. It has no reset-all option.
-
-2.
-
-Do not recursively remove the entire
-`Library/Displays/Contents/Resources/Overrides` directory. It can contain
-other display and system configuration. If Intel safe rollback cannot run,
-preserve the manifest and target file, then identify the single
-`DisplayProductID-<product ID>` file for the selected display before manual
-recovery.
-
-## Inspired
+## Inspired By
 
 https://www.tonymacx86.com/threads/solved-black-screen-with-gtx-1070-lg-ultrafine-5k-sierra-10-12-4.219872/page-4#post-1644805
 

@@ -17,26 +17,32 @@ assert_contains() {
     local haystack="$1"
     local expected="$2"
 
-    printf '%s\n' "$haystack" | /usr/bin/grep -Fq "$expected" || fail "missing expected text: ${expected}"
+    case "$haystack" in
+    *"$expected"*)
+        ;;
+    *)
+        fail "missing expected text: ${expected}"
+        ;;
+    esac
 }
 
 assert_not_contains() {
     local haystack="$1"
     local unexpected="$2"
 
-    if printf '%s\n' "$haystack" | /usr/bin/grep -Fq "$unexpected"; then
+    case "$haystack" in
+    *"$unexpected"*)
         fail "unexpected text: ${unexpected}"
-    fi
-}
-
-assert_file_absent() {
-    [[ ! -e "$1" && ! -L "$1" ]] || fail "unexpected file: $1"
+        ;;
+    *)
+        ;;
+    esac
 }
 
 first_edid="$(/usr/bin/sed -n 's/.*"IODisplayEDID" = <\([0-9A-Fa-f][0-9A-Fa-f]*\)>.*/\1/p' "${fixture_dir}/ioreg-displays.txt" | /usr/bin/sed -n '1p')"
 [[ -n "$first_edid" ]] || fail "could not load an EDID fixture"
 
-menu_preview_output="$(\
+menu_preview_output="$(
     langInputChoice="Enter your choice" \
     langEnterError="Enter error" \
     langIntelSafeTitle="Intel safe HiDPI" \
@@ -60,7 +66,7 @@ assert_contains "$menu_preview_output" "Intel safe HiDPI: 1920x1080"
 assert_contains "$menu_preview_output" "compact: 960x540 framebuffer=1920x1080 payload="
 assert_contains "$menu_preview_output" "Cancelled"
 
-menu_smooth_preview_output="$(\
+menu_smooth_preview_output="$(
     langInputChoice="Enter your choice" \
     langEnterError="Enter error" \
     langIntelSafeTitle="Intel safe HiDPI" \
@@ -85,26 +91,19 @@ assert_contains "$menu_smooth_preview_output" "near-native: 1920x1079 framebuffe
 assert_contains "$menu_smooth_preview_output" "Cancelled"
 
 menu_definition="$(/bin/bash -c 'source "$1"; declare -f intel_safe_hidpi' bash "$menu_library")"
-if printf '%s\n' "$menu_definition" | /usr/bin/grep -Fq "sudo"; then
-    fail "safe menu must not invoke sudo"
-fi
+assert_not_contains "$menu_definition" "sudo"
 
-entrypoint_trace="$(mktemp "${TMPDIR:-/tmp}/one-key-hidpi-menu.XXXXXX")" || fail "could not create menu trace"
-standalone_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-standalone.XXXXXX")" || fail "could not create standalone fixture"
-standalone_script="${standalone_dir}/hidpi.sh"
-remote_source_marker="${standalone_dir}/remote-source-marker"
 menu_tool_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-menu-tool.XXXXXX")" || fail "could not create menu tool fixture"
 menu_tool_path="${menu_tool_dir}/intel-hidpi.sh"
 menu_tool_trace="${menu_tool_dir}/trace"
 
 cleanup() {
-    /bin/rm -f "$entrypoint_trace"
-    /bin/rm -rf "$standalone_dir"
     /bin/rm -rf "$menu_tool_dir"
 }
 trap cleanup EXIT
 
 # shellcheck disable=SC2016
+# This fixture validates menu command construction without exercising apply or revert.
 printf '%s\n' \
     '#!/bin/bash' \
     'printf "%s\n" "$*" >> "$MENU_TOOL_TRACE"' \
@@ -117,6 +116,9 @@ printf '%s\n' \
     '    ;;' \
     'apply)' \
     '    printf "apply fixture\n"' \
+    '    ;;' \
+    'revert)' \
+    '    printf "revert fixture\n"' \
     '    ;;' \
     '*)' \
     '    exit 1' \
@@ -150,189 +152,64 @@ menu_tool_calls="$(/bin/cat "$menu_tool_trace")" || fail "could not read menu to
 assert_contains "$menu_tool_calls" "preview --native-resolution 1920x1080 --mode-set smooth --include-near-native"
 assert_contains "$menu_tool_calls" "apply --vendor-id 30ae --product-id 62a5 --native-resolution 1920x1080 --mode-set smooth --include-near-native --confirm"
 
-if ! /bin/bash -c '
-    source "$1"
-    selected_edid="$2"
-    trace_path="$3"
-    is_applesilicon=false
-    select_display() {
-        EDID="$selected_edid"
-        Vid=30ae
-        Pid=62a5
-    }
-    init() {
-        printf "legacy-init\\n" >> "$trace_path"
-    }
-    intel_safe_hidpi() {
-        printf "%s|%s|%s|%s\\n" "$1" "$2" "$3" "$4" >> "$trace_path"
-    }
-    printf "4\\n" | start
-' bash "$repo_dir/hidpi.sh" "$first_edid" "$entrypoint_trace" >/dev/null; then
-    fail "safe entrypoint selection should succeed"
-fi
+: > "$menu_tool_trace"
+menu_revert_output="$(
+    MENU_TOOL_TRACE="$menu_tool_trace" \
+    langInputChoice="Enter your choice" \
+    langEnterError="Enter error" \
+    langIntelSafeTitle="Intel safe HiDPI" \
+    langIntelSafeModePreset="(1) Compatibility preset modes" \
+    langIntelSafeModeSmooth="(2) Smooth HiDPI modes" \
+    langIntelSafeNearNative="Add a near-native compatibility mode?" \
+    langIntelSafeNearNativeNo="(1) No" \
+    langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeApply="(1) Apply generated modes" \
+    langIntelSafeRevert="(2) Revert generated modes" \
+    langIntelSafeCancel="(3) Cancel" \
+    langIntelSafeRoot="Run this script as root" \
+    langIntelSafeApplyConfirm="Type APPLY" \
+    langIntelSafeRevertConfirm="Type REVERT" \
+    langIntelSafeCancelled="Cancelled" \
+    langIntelSafeToolMissing="Tool is missing" \
+    /bin/bash -c 'source "$1"; intel_safe_hidpi_has_root_privilege() { return 0; }; printf "1\\n2\\nREVERT\\n" | intel_safe_hidpi "$2" test-edid 30ae 62a5' bash \
+        "$menu_library" "$menu_tool_path"
+)" || fail "revert forwarding fixture should succeed"
+assert_contains "$menu_revert_output" "revert fixture"
+menu_tool_calls="$(/bin/cat "$menu_tool_trace")" || fail "could not read revert tool trace"
+assert_contains "$menu_tool_calls" "preview --native-resolution 1920x1080 --mode-set preset"
+assert_contains "$menu_tool_calls" "revert --vendor-id 30ae --product-id 62a5 --confirm"
+assert_not_contains "$menu_tool_calls" "apply --"
 
-entrypoint_output="$(/bin/cat "$entrypoint_trace")" || fail "safe entrypoint trace should be readable"
-[[ "$entrypoint_output" == "${repo_dir}/intel-hidpi.sh|${first_edid}|30ae|62a5" ]] || fail "safe entrypoint must call the safe menu with the selected display"
-
-assert_legacy_dispatch() {
-    local choice="$1"
-    local expected="$2"
-    local actual
-
-    : > "$entrypoint_trace"
-    if ! /bin/bash -c '
-        source "$1"
-        trace_path="$2"
-        is_applesilicon=false
-        select_display() {
-            EDID=test
-            Vid=30ae
-            Pid=62a5
-        }
-        init() {
-            printf "init\\n" >> "$trace_path"
-        }
-        enable_hidpi() {
-            printf "enable\\n" >> "$trace_path"
-        }
-        enable_hidpi_with_patch() {
-            printf "patch\\n" >> "$trace_path"
-        }
-        disable() {
-            printf "disable\\n" >> "$trace_path"
-        }
-        printf "%s\\n" "$3" | start
-    ' bash "$repo_dir/hidpi.sh" "$entrypoint_trace" "$choice" >/dev/null; then
-        fail "legacy menu option ${choice} should succeed"
-    fi
-
-    actual="$(/bin/cat "$entrypoint_trace")" || fail "legacy menu trace should be readable"
-    [[ "$actual" == "$expected" ]] || fail "legacy menu option ${choice} dispatch changed"
-}
-
-assert_legacy_dispatch 1 $'init\nenable'
-assert_legacy_dispatch 2 $'init\npatch'
-assert_legacy_dispatch 3 $'init\ndisable'
-
-assert_legacy_init_failure_stops_dispatch() {
-    local choice="$1"
-    local actual
-
-    : > "$entrypoint_trace"
-    if /bin/bash -c '
-        source "$1"
-        trace_path="$2"
-        is_applesilicon=false
-        select_display() {
-            EDID=test
-            Vid=30ae
-            Pid=62a5
-        }
-        init() {
-            printf "init\n" >> "$trace_path"
-            return 1
-        }
-        enable_hidpi() {
-            printf "enable\n" >> "$trace_path"
-        }
-        enable_hidpi_with_patch() {
-            printf "patch\n" >> "$trace_path"
-        }
-        disable() {
-            printf "disable\n" >> "$trace_path"
-        }
-        printf "%s\n" "$3" | start
-    ' bash "$repo_dir/hidpi.sh" "$entrypoint_trace" "$choice" >/dev/null 2>&1; then
-        fail "legacy menu option ${choice} must stop when initialization fails"
-    fi
-
-    actual="$(/bin/cat "$entrypoint_trace")" || fail "legacy initialization trace should be readable"
-    [[ "$actual" == "init" ]] || fail "legacy menu option ${choice} continued after initialization failed"
-}
-
-assert_legacy_init_failure_stops_dispatch 1
-assert_legacy_init_failure_stops_dispatch 2
-assert_legacy_init_failure_stops_dispatch 3
-
-readme_zh_contents="$(/bin/cat "${repo_dir}/README-zh.md")" || fail "could not read Chinese README"
-assert_contains "$readme_zh_contents" "sudo ./intel-hidpi.sh revert"
-assert_not_contains "$readme_zh_contents" "rm -rf /Volumes/你的系统盘/Library/Displays/Contents/Resources/Overrides"
-
-readme_en_contents="$(/bin/cat "${repo_dir}/README.md")" || fail "could not read English README"
-assert_contains "$readme_en_contents" "sudo ./intel-hidpi.sh revert"
-assert_not_contains "$readme_en_contents" 'rm -rf /Volumes/"Your System Disk Part"/Library/Displays/Contents/Resources/Overrides'
-
-/bin/cp "$repo_dir/hidpi.sh" "$standalone_script" || fail "could not create standalone hidpi script"
-/bin/chmod +x "$standalone_script" || fail "could not mark standalone hidpi script executable"
-
-assert_standalone_legacy_dispatch() {
-    local choice="$1"
-    local expected="$2"
-    local actual
-
-    : > "$entrypoint_trace"
-    if ! /bin/bash -c '
-        cd "$2"
-        source "$1"
-        trace_path="$3"
-        is_applesilicon=false
-        select_display() {
-            EDID=test
-            Vid=30ae
-            Pid=62a5
-        }
-        init() {
-            printf "init\\n" >> "$trace_path"
-        }
-        enable_hidpi() {
-            printf "enable\\n" >> "$trace_path"
-        }
-        enable_hidpi_with_patch() {
-            printf "patch\\n" >> "$trace_path"
-        }
-        disable() {
-            printf "disable\\n" >> "$trace_path"
-        }
-        printf "%s\\n" "$4" | start
-    ' bash "$standalone_script" "$standalone_dir" "$entrypoint_trace" "$choice" >/dev/null; then
-        fail "standalone legacy menu option ${choice} should succeed"
-    fi
-
-    actual="$(/bin/cat "$entrypoint_trace")" || fail "standalone legacy trace should be readable"
-    [[ "$actual" == "$expected" ]] || fail "standalone legacy menu option ${choice} dispatch changed"
-}
-
-assert_standalone_legacy_dispatch 1 $'init\nenable'
-assert_standalone_legacy_dispatch 2 $'init\npatch'
-assert_standalone_legacy_dispatch 3 $'init\ndisable'
-
-remote_script="$(/bin/cat "$standalone_script")" || fail "could not read standalone hidpi script"
-/bin/mkdir -p "${standalone_dir}/lib" || fail "could not create remote helper fixture"
-# shellcheck disable=SC2016
-printf 'printf "unexpected helper source\\n" >> "$REMOTE_SOURCE_MARKER"\n' > "${standalone_dir}/lib/intel_hidpi_menu.sh"
-printf ':\n' > "${standalone_dir}/intel-hidpi.sh"
-remote_output=""
-if remote_output="$(
-    cd "$standalone_dir" || exit 1
-    printf "4\n" | LANG=C LC_ALL=C REMOTE_SOURCE_MARKER="$remote_source_marker" /bin/bash -c '
-        remote_script="$1"
-        remote_edid="$2"
-        ioreg() {
-            printf "    | | \\\"IODisplayEDID\\\" = <%s>\\n" "$remote_edid"
-        }
-        eval "$remote_script"
-    ' bash "$remote_script" "$first_edid" 2>&1
-)"; then
-    fail "remote single-file script should reject an unavailable safe-menu selection"
-fi
-assert_contains "$remote_output" "(1) Enable HIDPI"
-assert_contains "$remote_output" "(3) Disable HIDPI"
-assert_contains "$remote_output" "Enter error, bye"
-assert_not_contains "$remote_output" "Intel safe HiDPI"
-assert_file_absent "$remote_source_marker"
+: > "$menu_tool_trace"
+confirmation_cancel_output="$(
+    MENU_TOOL_TRACE="$menu_tool_trace" \
+    langInputChoice="Enter your choice" \
+    langEnterError="Enter error" \
+    langIntelSafeTitle="Intel safe HiDPI" \
+    langIntelSafeModePreset="(1) Compatibility preset modes" \
+    langIntelSafeModeSmooth="(2) Smooth HiDPI modes" \
+    langIntelSafeNearNative="Add a near-native compatibility mode?" \
+    langIntelSafeNearNativeNo="(1) No" \
+    langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeApply="(1) Apply generated modes" \
+    langIntelSafeRevert="(2) Revert generated modes" \
+    langIntelSafeCancel="(3) Cancel" \
+    langIntelSafeRoot="Run this script as root" \
+    langIntelSafeApplyConfirm="Type APPLY" \
+    langIntelSafeRevertConfirm="Type REVERT" \
+    langIntelSafeCancelled="Cancelled" \
+    langIntelSafeToolMissing="Tool is missing" \
+    /bin/bash -c 'source "$1"; intel_safe_hidpi_has_root_privilege() { return 0; }; printf "1\\n1\\nno\\n" | intel_safe_hidpi "$2" test-edid 30ae 62a5' bash \
+        "$menu_library" "$menu_tool_path"
+)" || fail "typed confirmation cancellation should succeed"
+assert_contains "$confirmation_cancel_output" "Cancelled"
+menu_tool_calls="$(/bin/cat "$menu_tool_trace")" || fail "could not read cancellation tool trace"
+assert_contains "$menu_tool_calls" "preview --native-resolution 1920x1080 --mode-set preset"
+assert_not_contains "$menu_tool_calls" "apply --"
 
 if ((EUID != 0)); then
-    if nonroot_output="$(\
+    nonroot_output=""
+    if nonroot_output="$(
         langInputChoice="Enter your choice" \
         langEnterError="Enter error" \
         langIntelSafeTitle="Intel safe HiDPI" \

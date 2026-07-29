@@ -1,4 +1,4 @@
-INTEL_HIDPI_STORAGE_CORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+INTEL_HIDPI_STORAGE_CORE_DIR="$(builtin cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && /bin/pwd)" || return 1
 # shellcheck source=lib/intel_hidpi_storage_support.sh
 source "${INTEL_HIDPI_STORAGE_CORE_DIR}/intel_hidpi_storage_support.sh" || return 1
 unset INTEL_HIDPI_STORAGE_CORE_DIR

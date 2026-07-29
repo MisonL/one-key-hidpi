@@ -10,7 +10,7 @@ OPERATION_LOCK_IDENTITY=""
 PLIST_OPERATION_HASH=""
 PLIST_OPERATION_IDENTITY=""
 
-INTEL_HIDPI_STORAGE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+INTEL_HIDPI_STORAGE_LIB_DIR="$(builtin cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && /bin/pwd)" || return 1
 # shellcheck source=lib/intel_hidpi_mode_configuration.sh
 source "${INTEL_HIDPI_STORAGE_LIB_DIR}/intel_hidpi_mode_configuration.sh" || return 1
 # shellcheck source=lib/intel_hidpi_darwin_fs.sh
