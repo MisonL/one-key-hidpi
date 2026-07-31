@@ -43,7 +43,7 @@ with_recalculated_base_checksum() {
     printf '%s%02x\n' "$base_without_checksum" "$(((256 - checksum % 256) % 256))"
 }
 
-scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-inventory.XXXXXX")"
+scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-inventory.XXXXXX")" || fail "could not create scratch directory"
 
 cleanup() {
     /bin/rm -rf "$scratch_dir"

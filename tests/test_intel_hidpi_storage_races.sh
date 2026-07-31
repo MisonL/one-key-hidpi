@@ -687,9 +687,10 @@ assert_file_contents "${directory_nonempty_target}/sentinel" "competing director
 directory_nonempty_quarantine="$(/usr/bin/find "$directory_nonempty_root" -maxdepth 1 -name '.one-key-hidpi-directory-quarantine-*' -print -quit)" || fail "could not inspect nonempty directory quarantine"
 [[ -z "$directory_nonempty_quarantine" ]] || fail "nonempty directory cleanup must restore the original path"
 
-alias_lock_real_root="/private/tmp/one-key-hidpi-alias-lock-${scratch_dir##*/}"
-alias_lock_root="/tmp/${alias_lock_real_root#/private/tmp/}"
-[[ ! -e "$alias_lock_real_root" && ! -L "$alias_lock_real_root" ]] || fail "could not prepare an absent /tmp alias lock root"
+alias_lock_candidate_root="/private/tmp/one-key-hidpi-alias-lock-${scratch_dir##*/}"
+alias_lock_root="/tmp/${alias_lock_candidate_root#/private/tmp/}"
+[[ ! -e "$alias_lock_candidate_root" && ! -L "$alias_lock_candidate_root" ]] || fail "could not prepare an absent /tmp alias lock root"
+alias_lock_real_root="$alias_lock_candidate_root"
 /bin/bash -c '
     source "$1"
     raw_root="$2"

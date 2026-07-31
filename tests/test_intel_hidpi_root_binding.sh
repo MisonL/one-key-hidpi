@@ -25,7 +25,7 @@ assert_contains() {
     printf '%s\n' "$haystack" | /usr/bin/grep -Fq "$expected" || fail "missing expected text: $expected"
 }
 
-scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-root-binding.XXXXXX")"
+scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-root-binding.XXXXXX")" || fail "could not create scratch directory"
 
 cleanup() {
     /bin/rm -rf "$scratch_dir"
