@@ -48,6 +48,9 @@ The local menu offers `preset` compatibility modes and a denser `smooth` mode
 set. `smooth` uses the native display aspect ratio from two-thirds of native
 through native size, with no more than 41 candidates. You may explicitly add a
 near-native compatibility mode when it is appropriate for the selected panel.
+Panels whose integer geometry cannot provide at least two exact-aspect-ratio
+candidates in that range are rejected by `smooth`; use `preset` for those
+panels.
 For an explicit BetterDisplay-compatible set, `smooth` can also add two ordinary
 resolution payloads for every HiDPI candidate: the logical resolution and its
 2x framebuffer resolution. This option is intended for compatibility with the

@@ -265,7 +265,8 @@ generate_smooth_preview_modes() {
     smooth_height_step=$((native_height / smooth_divisor))
     smooth_first_sample=$(((smooth_divisor * SMOOTH_LOWER_NUMERATOR + SMOOTH_LOWER_DENOMINATOR - 1) / SMOOTH_LOWER_DENOMINATOR))
     smooth_available_count=$((smooth_divisor - smooth_first_sample + 1))
-    ((smooth_available_count >= 2)) || fail "smooth mode set requires at least two exact-aspect-ratio candidates from 2/3 through native"
+    ((smooth_available_count >= 2)) ||
+        fail "native resolution has fewer than two integer exact-aspect-ratio candidates from 2/3 through native; use --mode-set preset"
     if ((smooth_available_count > SMOOTH_MAX_MODE_COUNT)); then
         smooth_mode_count="$SMOOTH_MAX_MODE_COUNT"
     else

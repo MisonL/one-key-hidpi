@@ -41,6 +41,8 @@
 本地菜单提供 `preset` 兼容模式和更密集的 `smooth` 模式集。`smooth` 按显示器原生宽高比，
 从不低于原生尺寸三分之二的位置生成到原生尺寸，最多 41 档。确有需要时可以明确加入
 近原生兼容模式。
+如果面板的整数几何尺寸在该范围内无法提供至少两个精确宽高比候选，`smooth` 会显式拒绝；
+此时应使用 `preset`。
 在 `smooth` 模式下，还可以显式加入与 BetterDisplay override 布局兼容的相似分辨率：
 每个 HiDPI 候选额外加入逻辑分辨率和对应 2x framebuffer 分辨率各一个普通 payload。
 该选项用于兼容已观察到的 BetterDisplay override 布局，不代表实现了连续实时缩放。

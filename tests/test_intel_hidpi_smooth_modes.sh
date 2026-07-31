@@ -169,7 +169,7 @@ if low_divisor_output="$("${repo_dir}/intel-hidpi.sh" preview \
     --mode-set smooth 2>&1)"; then
     fail "smooth preview must reject a panel without at least two exact-aspect-ratio candidates"
 fi
-assert_contains "$low_divisor_output" "error: smooth mode set requires at least two exact-aspect-ratio candidates from 2/3 through native"
+assert_contains "$low_divisor_output" "error: native resolution has fewer than two integer exact-aspect-ratio candidates from 2/3 through native; use --mode-set preset"
 
 near_native_boundary_output=""
 if near_native_boundary_output="$("${repo_dir}/intel-hidpi.sh" preview \

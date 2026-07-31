@@ -88,7 +88,7 @@ if low_divisor_apply_output="$("${repo_dir}/intel-hidpi.sh" apply \
     --confirm 2>&1)"; then
     fail "apply must reject a smooth mode set without enough exact-aspect-ratio candidates"
 fi
-assert_contains "$low_divisor_apply_output" "error: smooth mode set requires at least two exact-aspect-ratio candidates from 2/3 through native"
+assert_contains "$low_divisor_apply_output" "error: native resolution has fewer than two integer exact-aspect-ratio candidates from 2/3 through native; use --mode-set preset"
 assert_file_absent "$low_divisor_overrides_root"
 assert_file_absent "$low_divisor_state_root"
 
