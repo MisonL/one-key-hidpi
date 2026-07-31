@@ -117,11 +117,14 @@ source "$INTEL_MENU_PATH" || {
 
 safe_entrypoint_normalize_hex_id() {
     local raw_value="$1"
+    local allow_zero="${2:-false}"
     local decimal_value
 
     [[ "$raw_value" =~ ^[0-9A-Fa-f]{4}$ ]] || return 1
     decimal_value=$((16#$raw_value))
-    ((decimal_value > 0)) || return 1
+    if ((decimal_value == 0)) && [[ "$allow_zero" != true ]]; then
+        return 1
+    fi
     printf '%x\n' "$decimal_value"
 }
 
@@ -137,7 +140,7 @@ safe_entrypoint_record_from_edid() {
     native_resolution="$(/bin/bash "$INTEL_TOOL_PATH" native-resolution --edid "$normalized_edid" 2>/dev/null)" || return 1
     [[ "$native_resolution" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || return 1
     vendor_id="$(safe_entrypoint_normalize_hex_id "${normalized_edid:16:4}")" || return 1
-    product_id="$(safe_entrypoint_normalize_hex_id "${normalized_edid:22:2}${normalized_edid:20:2}")" || return 1
+    product_id="$(safe_entrypoint_normalize_hex_id "${normalized_edid:22:2}${normalized_edid:20:2}" true)" || return 1
 
     printf '%s|%s|%s|%s\n' "$normalized_edid" "$vendor_id" "$product_id" "$native_resolution"
 }

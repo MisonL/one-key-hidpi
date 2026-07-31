@@ -123,6 +123,8 @@ invalid_first_ioreg_file="${workspace_root}/invalid-first-ioreg.txt"
 invalid_only_ioreg_file="${workspace_root}/invalid-only-ioreg.txt"
 duplicate_ioreg_file="${workspace_root}/duplicate-ioreg.txt"
 same_target_ioreg_file="${workspace_root}/same-target-ioreg.txt"
+zero_product_ioreg_file="${workspace_root}/zero-product-ioreg.txt"
+zero_vendor_ioreg_file="${workspace_root}/zero-vendor-ioreg.txt"
 
 cleanup() {
     /bin/rm -rf "$workspace_root"
@@ -193,10 +195,16 @@ printf '    | | "IODisplayEDID" = <%s>\n' "$invalid_first_edid" > "$invalid_only
 
 duplicate_target_edid="${first_edid:0:24}01000000${first_edid:32}"
 duplicate_target_edid="$(with_recalculated_base_checksum "$duplicate_target_edid")"
+zero_product_edid="${first_edid:0:20}0000${first_edid:24}"
+zero_product_edid="$(with_recalculated_base_checksum "$zero_product_edid")"
+zero_vendor_edid="${first_edid:0:16}0000${first_edid:20}"
+zero_vendor_edid="$(with_recalculated_base_checksum "$zero_vendor_edid")"
 printf '    | | "IODisplayEDID" = <%s>\n' "$first_edid" > "$duplicate_ioreg_file"
 printf '    | | "IODisplayEDID" = <%s>\n' "$first_edid" >> "$duplicate_ioreg_file"
 printf '    | | "IODisplayEDID" = <%s>\n' "$first_edid" > "$same_target_ioreg_file"
 printf '    | | "IODisplayEDID" = <%s>\n' "$duplicate_target_edid" >> "$same_target_ioreg_file"
+printf '    | | "IODisplayEDID" = <%s>\n' "$zero_product_edid" > "$zero_product_ioreg_file"
+printf '    | | "IODisplayEDID" = <%s>\n' "$zero_vendor_edid" > "$zero_vendor_ioreg_file"
 
 run_dispatch_fixture() {
     local ioreg_file="$1"
@@ -228,6 +236,15 @@ assert_contains "$multi_display_dispatch" "dispatch|${complete_root}/intel-hidpi
 duplicate_edid_dispatch="$(run_dispatch_fixture "$duplicate_ioreg_file" "")" || fail "duplicate EDID records should be deduplicated"
 assert_contains "$duplicate_edid_dispatch" "dispatch|${complete_root}/intel-hidpi.sh|${first_edid}|30ae|62a5"
 assert_not_contains "$duplicate_edid_dispatch" "Detected display records"
+
+zero_product_dispatch="$(run_dispatch_fixture "$zero_product_ioreg_file" "")" || fail "a valid EDID with a zero product ID should dispatch successfully"
+assert_contains "$zero_product_dispatch" "dispatch|${complete_root}/intel-hidpi.sh|${zero_product_edid}|30ae|0"
+
+zero_vendor_output=""
+if zero_vendor_output="$(run_dispatch_fixture "$zero_vendor_ioreg_file" "" 2>&1)"; then
+    fail "an EDID with a zero vendor ID must fail"
+fi
+assert_contains "$zero_vendor_output" "No valid external display was found"
 
 invalid_selection_output=""
 if invalid_selection_output="$(run_dispatch_fixture "${fixture_dir}/ioreg-displays.txt" $'3\n' 2>&1)"; then
