@@ -29,16 +29,19 @@ read_offline_mode_capture() {
     /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/perl -MFcntl=:DEFAULT -e '
         my ($path, $maximum_bytes) = @ARGV;
         exit 1 unless defined $maximum_bytes && $maximum_bytes =~ /\A[1-9][0-9]*\z/;
+        my @path_stat = lstat($path);
+        exit 1 unless @path_stat;
+        exit 2 if -l _ || !-f _;
         sysopen(my $handle, $path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) or exit 1;
-        -f $handle or exit 1;
+        -f $handle or exit 2;
 
         my $capture = q{};
         while (1) {
             my $read = read($handle, my $chunk, 64 * 1024);
-            exit 1 unless defined $read;
+            exit 3 unless defined $read;
             last if $read == 0;
-            exit 1 if $chunk =~ /\0/;
-            exit 2 if length($capture) + $read > $maximum_bytes;
+            exit 4 if $chunk =~ /\0/;
+            exit 5 if length($capture) + $read > $maximum_bytes;
             $capture .= $chunk;
         }
         print $capture;
@@ -288,9 +291,18 @@ run_verify_modes_command() {
         0)
             ;;
         1)
-            fail "modes file must be a regular non-symbolic-link text file"
+            fail "could not open modes file"
             ;;
         2)
+            fail "modes file must be a regular non-symbolic-link text file"
+            ;;
+        3)
+            fail "could not read modes file"
+            ;;
+        4)
+            fail "modes file contains NUL bytes"
+            ;;
+        5)
             fail "modes file exceeds ${MAX_OFFLINE_MODE_CAPTURE_BYTES} bytes"
             ;;
         *)

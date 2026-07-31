@@ -35,6 +35,7 @@ trailing_mode_path="${scratch_dir}/trailing-mode.txt"
 binary_modes_path="${scratch_dir}/binary-modes.txt"
 symlink_modes_path="${scratch_dir}/symlink-modes.txt"
 oversized_modes_path="${scratch_dir}/oversized-modes.txt"
+missing_modes_path="${scratch_dir}/missing-modes.txt"
 
 cat > "$full_modes_path" <<'EOF'
 target|vendor-id=000030AE|product-id=000062a5
@@ -221,7 +222,17 @@ if binary_modes_output="$("${repo_dir}/intel-hidpi.sh" verify-modes \
     --modes-file "$binary_modes_path" 2>&1)"; then
     fail "a binary capture file must fail"
 fi
-assert_contains "$binary_modes_output" "error: modes file must be a regular non-symbolic-link text file"
+assert_contains "$binary_modes_output" "error: modes file contains NUL bytes"
+
+missing_modes_output=""
+if missing_modes_output="$("${repo_dir}/intel-hidpi.sh" verify-modes \
+    --vendor-id 30ae \
+    --product-id 62a5 \
+    --native-resolution 1920x1080 \
+    --modes-file "${missing_modes_path}" 2>&1)"; then
+    fail "a missing capture file must fail"
+fi
+assert_contains "$missing_modes_output" "error: could not open modes file"
 
 /bin/ln -s "$full_modes_path" "$symlink_modes_path" || fail "could not create symlink fixture"
 symlink_modes_output=""
