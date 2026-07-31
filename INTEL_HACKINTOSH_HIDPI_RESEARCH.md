@@ -119,6 +119,7 @@ framebuffer payload 相同或输入超界时，生成器会在输出前显式失
 - IH-021 至 IH-025：审查同步、fixture 清理、ID 边界、离线捕获和低 GCD 诊断已完成。
 - IH-026：payload 32 位边界、identical 防御和局部 pipeline pipefail 已完成。
 - IH-027：双语 README、调研和审查口径同步在当前任务中收口。
+- IH-028：全部 Markdown 文档的叙述性内容已统一为中文，技术标识、命令和历史证据保持原样。
 
 ## 原始原子任务记录（已归档）
 

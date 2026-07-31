@@ -1,90 +1,80 @@
-# Intel HiDPI for macOS
+# macOS Intel HiDPI
 
-[English](README.md) | [中文](README-zh.md)
+[项目说明](README.md) | [补充中文说明](README-zh.md)
 
-This fork supports one Intel-safe HiDPI workflow. It reads a connected
-display's EDID, generates a bounded set of 2x HiDPI candidates, and can merge
-those candidates into the display's override only after explicit confirmation.
-It is not a replacement for BetterDisplay's flexible live scaling or GUI.
+本 fork 提供一条 Intel 安全 HiDPI 工作流。它读取已连接显示器的 EDID，生成数量受限的
+2x HiDPI 候选模式，并且只有在明确确认后才会把候选模式合并到显示器 override 中。
+它不是 BetterDisplay 连续实时缩放或图形界面的替代品。
 
-## Requirements
+## 前提条件
 
-- Use a complete local checkout. The repository root must contain `hidpi.sh`,
-  `intel-hidpi.sh`, and the complete `lib/` directory.
-- Use a connected display that exposes a valid EDID through `ioreg`.
-- Do not use a downloaded single script. The safe entrypoint refuses an
-  incomplete checkout instead of looking for helper files elsewhere.
-- The entrypoint and direct Intel tool reject symbolic links for their helper
-  files and `lib/` directory, so they do not load a dependency from another
-  location.
+- 必须使用完整的本地 checkout。仓库根目录必须包含 `hidpi.sh`、`intel-hidpi.sh` 和完整的
+  `lib/` 目录。
+- 显示器必须能通过 `ioreg` 暴露有效 EDID。
+- 不要下载单个脚本后直接运行。安全入口发现 checkout 不完整时会显式失败，不会去其他位置
+  查找辅助文件。
+- 安全入口和直接运行的 Intel 工具会拒绝其辅助文件及 `lib/` 目录的符号链接（symbolic links），因此不会从
+  其他位置加载依赖。
 
-When more than one valid display record is present, the entrypoint prints its
-vendor ID, product ID, and native resolution and requires an explicit choice.
-The EDID, identifiers, and native resolution are kept in one record. Different
-EDIDs that map to the same override target are rejected because that target
-cannot be selected safely.
+当存在多条有效显示器记录时，入口会输出 vendor ID、product ID 和原生分辨率，并要求明确
+选择。EDID、标识和原生分辨率始终保存在同一条记录中。不同 EDID 如果映射到同一个 override
+目标，会被拒绝，因为该目标无法安全选择。
 
-## Inventory
+## 只读盘点
 
-Inspect EDID-derived metadata and existing override modes without writing a
-file:
+下面的命令只检查 EDID 派生元数据和已有 override 模式，不会写入文件：
 
 ```bash
 ./intel-hidpi.sh inventory
 ```
 
-The command reports valid display records, their native resolutions, and the
-matching override path. It fails explicitly when no valid EDID is available.
+命令会报告有效显示器记录、原生分辨率和匹配的 override 路径；没有有效 EDID 时会显式失败。
 
-## Interactive Entry Point
+## 交互入口
 
-Preview generated modes and cancel without changing an override:
+可以先预览生成的模式并取消，整个过程不会修改 override：
 
 ```bash
 ./hidpi.sh
 ```
 
-The local menu offers `preset` compatibility modes and a denser `smooth` mode
-set. `smooth` uses the native display aspect ratio from two-thirds of native
-through native size, with no more than 41 candidates. You may explicitly add a
-near-native compatibility mode when it is appropriate for the selected panel.
-Panels whose integer geometry cannot provide at least two exact-aspect-ratio
-candidates in that range are rejected by `smooth`; use `preset` for those
-panels.
-For an explicit BetterDisplay-compatible set, `smooth` can also add two ordinary
-resolution payloads for every HiDPI candidate: the logical resolution and its
-2x framebuffer resolution. This option is intended for compatibility with the
-observed BetterDisplay override layout, not as a claim of flexible live scaling.
-Ordinary payload dimensions are encoded as unsigned 32-bit fields. The generator
-explicitly rejects non-positive values, leading zeros, values above
-`4294967295`, and a candidate whose logical and framebuffer payloads are identical.
-When applying a previewed selection, pass the same `--mode-set`,
-`--include-near-native`, and `--include-similar-resolutions` options to `apply`;
-a different selection intentionally produces a different candidate set.
+本地菜单提供 `preset` 兼容模式和更密集的 `smooth` 模式集。`smooth` 使用显示器原生宽高比，
+从原生尺寸的三分之二开始生成到原生尺寸，最多 41 个候选。适合选定面板时，可以明确加入
+近原生兼容模式。若面板的整数几何尺寸在该范围内无法提供至少两个精确宽高比候选，`smooth`
+会显式拒绝；此时应使用 `preset`。
 
-Applying or reverting requires a root invocation and the exact `APPLY` or
-`REVERT` confirmation word:
+如需生成与 BetterDisplay 取证布局兼容的集合，`smooth` 还可以为每个 HiDPI 候选加入两个
+普通分辨率 payload：逻辑分辨率和对应的 2x framebuffer 分辨率。该选项用于兼容已观察到的
+BetterDisplay override 布局，不表示实现了连续实时缩放。
+
+普通 payload 的宽高按无符号 32 位字段编码。生成器会显式拒绝非正数、前导零、超过
+`4294967295` 的值，以及逻辑和 framebuffer payload 相同的候选。
+
+应用已预览的选择时，`apply` 必须传入相同的 `--mode-set`、`--include-near-native` 和
+`--include-similar-resolutions` 选项；选择不同的参数会有意生成不同的候选集合。
+
+<!-- 兼容性原文索引：When applying a previewed selection, pass the same；symbolic links。 -->
+
+应用或回退都要求以 root 身份启动，并输入精确的 `APPLY` 或 `REVERT` 确认词：
 
 ```bash
 sudo ./hidpi.sh
 ```
 
-The menu does not elevate privileges by itself. It never falls back to the
-removed direct generator, remote download, or broad cleanup paths.
-The tool does not reload display services, reinitialize the display subsystem,
-reboot, or hot-plug displays. Static validation does not prove that macOS has
-accepted and exposed every candidate mode at runtime.
+菜单不会自行提权，也不会回退到已移除的直接生成、远程下载或宽泛清理路径。工具不会重载
+显示服务、重初始化显示子系统、重启或热插拔显示器。静态验证不能证明 macOS 在运行时已经
+接受并暴露每一个候选模式。
 
-## Command Line
+## 命令行
 
-Generate candidates without writing an override:
+只生成候选模式，不写入 override：
 
 ```bash
 ./intel-hidpi.sh preview --native-resolution 1920x1080 --mode-set smooth \
   --include-near-native --include-similar-resolutions
 ```
 
-Verify the selected override's payload set in a read-only operation:
+以只读方式核验选定 override 的 payload 集合：
 
 ```bash
 ./intel-hidpi.sh verify-override --vendor-id <vendor-id> --product-id <product-id> \
@@ -92,13 +82,11 @@ Verify the selected override's payload set in a read-only operation:
   --include-similar-resolutions
 ```
 
-`verify-override` checks the unique direct `scale-resolutions` data payload
-set in the target plist. It returns `0` only when that set matches exactly,
-reports duplicate direct data entries separately, and returns `2` when there
-are missing or extra payloads.
+`verify-override` 检查目标 plist 中直接位于 `scale-resolutions` 数组内的唯一 data payload
+集合。只有集合严格相等时才返回 `0`；重复的直接 data 条目会单独报告，存在缺失或额外
+payload 时返回 `2`。
 
-Verify the modes that CoreGraphics actually exposes for the selected display in
-a separate read-only operation:
+以另一条只读命令核验 CoreGraphics 实际暴露给选定显示器的模式：
 
 ```bash
 ./intel-hidpi.sh verify-modes --vendor-id <vendor-id> --product-id <product-id> \
@@ -106,37 +94,31 @@ a separate read-only operation:
   --include-similar-resolutions
 ```
 
-`verify-modes` compares both logical dimensions and framebuffer dimensions. The
-ordinary similar-resolution records intentionally use identical logical and
-framebuffer dimensions. It returns `0` for a complete result and `2` when some
-generated modes are missing. With `--modes-file`, it validates an offline
-capture only; that result is not evidence of the current display state.
+`verify-modes` 同时比较逻辑尺寸和 framebuffer 尺寸。普通相似分辨率记录有意使用相同的
+逻辑尺寸和 framebuffer 尺寸。完整结果返回 `0`，生成模式有缺失时返回 `2`。使用
+`--modes-file` 时只校验离线捕获记录；该结果不能证明当前显示器状态。
 
-The two checks answer different questions. A passing `verify-override` proves
-the override payload configuration, not that macOS accepted every payload as a
-live mode. A passing `verify-modes` proves the enumerated mode pairs, not that
-they came from this override file.
+两种核验回答的问题不同。`verify-override` 通过只能证明 override payload 配置正确，不能
+证明 macOS 接受了每个 payload 并将其作为运行时模式；`verify-modes` 通过只能证明枚举到了
+相应的模式对，不能证明这些模式来自该 override 文件。
 
-## Recovery
+## 精确回退
 
-Revert only an override previously recorded by this tool for the selected
-vendor and product ID:
+只回退本工具此前为指定 vendor 和 product ID 记录过的 override：
 
 ```bash
 sudo ./intel-hidpi.sh revert --vendor-id <vendor-id> --product-id <product-id> --confirm
 ```
 
-The command checks its manifest, target content, and override root before it
-restores or removes anything. It stops when the recorded state is missing or
-has changed outside the tool.
+命令会在恢复或删除之前核验 manifest、目标内容和 override 根。记录缺失或目标已被工具外部
+修改时会停止。
 
-## Limits
+## 限制
 
-EDID override behavior depends on the display, graphics driver, and macOS.
-Deterministic preview and fixture validation do not prove that a particular
-Intel Hackintosh configuration will expose every candidate at runtime.
+EDID override 的行为取决于显示器、图形驱动和 macOS。确定性的预览和 fixture 验证不能证明
+某个特定 Intel 黑苹果配置会在运行时暴露所有候选模式。
 
-## Inspired By
+## 参考来源
 
 https://www.tonymacx86.com/threads/solved-black-screen-with-gtx-1070-lg-ultrafine-5k-sierra-10-12-4.219872/page-4#post-1644805
 

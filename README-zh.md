@@ -1,6 +1,6 @@
 # macOS Intel HiDPI
 
-[English](README.md) | [中文](README-zh.md)
+[项目说明](README.md) | [补充中文说明](README-zh.md)
 
 本 fork 只支持一条 Intel 安全 HiDPI 工作流。它读取已连接显示器的 EDID，生成受限的
 2x HiDPI 候选模式，并且只会在明确确认后把候选模式合并到目标显示器的 override。
