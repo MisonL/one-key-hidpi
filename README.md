@@ -55,6 +55,9 @@ For an explicit BetterDisplay-compatible set, `smooth` can also add two ordinary
 resolution payloads for every HiDPI candidate: the logical resolution and its
 2x framebuffer resolution. This option is intended for compatibility with the
 observed BetterDisplay override layout, not as a claim of flexible live scaling.
+Ordinary payload dimensions are encoded as unsigned 32-bit fields. The generator
+explicitly rejects non-positive values, leading zeros, values above
+`4294967295`, and a candidate whose logical and framebuffer payloads are identical.
 When applying a previewed selection, pass the same `--mode-set`,
 `--include-near-native`, and `--include-similar-resolutions` options to `apply`;
 a different selection intentionally produces a different candidate set.
@@ -68,6 +71,9 @@ sudo ./hidpi.sh
 
 The menu does not elevate privileges by itself. It never falls back to the
 removed direct generator, remote download, or broad cleanup paths.
+The tool does not reload display services, reinitialize the display subsystem,
+reboot, or hot-plug displays. Static validation does not prove that macOS has
+accepted and exposed every candidate mode at runtime.
 
 ## Command Line
 

@@ -46,6 +46,8 @@
 在 `smooth` 模式下，还可以显式加入与 BetterDisplay override 布局兼容的相似分辨率：
 每个 HiDPI 候选额外加入逻辑分辨率和对应 2x framebuffer 分辨率各一个普通 payload。
 该选项用于兼容已观察到的 BetterDisplay override 布局，不代表实现了连续实时缩放。
+普通 payload 的宽高按 32 位无符号字段编码。生成器会拒绝非正整数、带前导零或超过
+`4294967295` 的输入；如果同一候选的逻辑和 framebuffer payload 相同，也会在输出前显式失败。
 将预览结果应用到 override 时，`apply` 必须复用预览所用的 `--mode-set`、
 `--include-near-native` 和 `--include-similar-resolutions` 参数；不同选择会有意生成不同的候选模式集。
 
@@ -56,6 +58,8 @@ sudo ./hidpi.sh
 ```
 
 菜单不会自行提权，也不会回退到已移除的直接生成、远程下载或宽泛清理路径。
+工具不会自动重载显示服务、重初始化显示子系统、重启或热插拔显示器；静态验证结果不等于
+macOS 已在运行时接受并暴露全部候选模式。
 
 ## 命令行
 
