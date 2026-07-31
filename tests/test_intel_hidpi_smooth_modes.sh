@@ -35,6 +35,15 @@ assert_not_contains() {
     fi
 }
 
+assert_not_contains_text() {
+    local haystack="$1"
+    local unexpected="$2"
+
+    if printf '%s\n' "$haystack" | /usr/bin/grep -Fq -- "$unexpected"; then
+        fail "unexpected text: ${unexpected}"
+    fi
+}
+
 assert_line_count() {
     local haystack="$1"
     local expected_count="$2"
@@ -135,6 +144,64 @@ assert_payload_set_sha256 "$similar_preview" "cf26372047fc80933bd980571ada7eaf30
 assert_payload_set_matches_fixture "$similar_preview"
 assert_document_contains "${repo_dir}/README.md" "--include-similar-resolutions"
 assert_document_contains "${repo_dir}/README-zh.md" "--include-similar-resolutions"
+
+identical_payload_output=""
+if identical_payload_output="$(
+    /bin/bash -c '
+        set -u
+        source "$1"
+        source "$2"
+        append_similar_resolution_preview_modes "one-x: 1920x1080 framebuffer=1920x1080 payload=AAAHgAAABDg="
+    ' bash \
+    "${repo_dir}/lib/intel_hidpi_plist_arrays.sh" \
+    "${repo_dir}/lib/intel_hidpi_similar_resolutions.sh" 2>&1
+)"; then
+    fail "identical logical and framebuffer payloads must fail explicitly"
+fi
+assert_contains "$identical_payload_output" "error: smooth similar-resolution generation produced identical logical and framebuffer payloads"
+assert_not_contains_text "$identical_payload_output" "one-x:"
+
+max_payload_output="$(
+    /bin/bash -c '
+        set -u
+        source "$1"
+        resolution_payload 4294967295 1
+    ' bash "${repo_dir}/lib/intel_hidpi_similar_resolutions.sh"
+)" || fail "maximum 32-bit resolution payload must encode successfully"
+[[ "$max_payload_output" == "/////wAAAAE=" ]] || fail "unexpected maximum 32-bit resolution payload: ${max_payload_output}"
+
+overflow_payload_output=""
+if overflow_payload_output="$(
+    /bin/bash -c '
+        set -u
+        source "$1"
+        resolution_payload 4294967296 1 >/dev/null
+    ' bash "${repo_dir}/lib/intel_hidpi_similar_resolutions.sh" 2>&1
+)"; then
+    fail "resolution payload dimensions above 32-bit range must fail explicitly"
+fi
+assert_contains "$overflow_payload_output" "error: resolution payload dimensions must be positive integers no greater than 4294967295"
+
+max_height_payload_output="$(
+    /bin/bash -c '
+        set -u
+        source "$1"
+        resolution_payload 1 4294967295
+    ' bash "${repo_dir}/lib/intel_hidpi_similar_resolutions.sh"
+)" || fail "maximum 32-bit height payload must encode successfully"
+[[ "$max_height_payload_output" == "AAAAAf////8=" ]] || fail "unexpected maximum 32-bit height payload"
+
+height_overflow_payload_output=""
+if height_overflow_payload_output="$(
+    /bin/bash -c '
+        set -u
+        source "$1"
+        resolution_payload 1 4294967296 >/dev/null
+    ' bash "${repo_dir}/lib/intel_hidpi_similar_resolutions.sh" 2>&1
+)"; then
+    fail "resolution payload heights above 32-bit range must fail explicitly"
+fi
+assert_contains "$height_overflow_payload_output" "error: resolution payload dimensions must be positive integers no greater than 4294967295"
 
 ultrawide_preview="$("${repo_dir}/intel-hidpi.sh" preview \
     --native-resolution 3440x1440 \

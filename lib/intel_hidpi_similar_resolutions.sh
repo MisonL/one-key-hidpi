@@ -1,13 +1,49 @@
 # shellcheck shell=bash
 
+readonly MAX_RESOLUTION_PAYLOAD_DIMENSION=4294967295
+
+resolution_payload_dimensions_are_valid() {
+    local width="$1"
+    local height="$2"
+    local maximum="$MAX_RESOLUTION_PAYLOAD_DIMENSION"
+    local width_digits
+    local height_digits
+    local maximum_digits
+
+    [[ "$width" =~ ^[1-9][0-9]*$ && "$height" =~ ^[1-9][0-9]*$ ]] || return 1
+    width_digits="${#width}"
+    height_digits="${#height}"
+    maximum_digits="${#maximum}"
+    if ((width_digits < maximum_digits && height_digits < maximum_digits)); then
+        return 0
+    fi
+    if ((width_digits > maximum_digits || height_digits > maximum_digits)); then
+        return 1
+    fi
+    if ((width_digits == maximum_digits)); then
+        ((10#$width <= 10#$maximum)) || return 1
+    fi
+    if ((height_digits == maximum_digits)); then
+        ((10#$height <= 10#$maximum)) || return 1
+    fi
+}
+
 resolution_payload() {
     local width="$1"
     local height="$2"
 
-    printf '%08x%08x' "$width" "$height" |
-        /usr/bin/xxd -r -p |
-        /usr/bin/base64 |
-        /usr/bin/tr -d '\n'
+    resolution_payload_dimensions_are_valid "$width" "$height" || {
+        printf 'error: resolution payload dimensions must be positive integers no greater than %s\n' \
+            "$MAX_RESOLUTION_PAYLOAD_DIMENSION" >&2
+        return 1
+    }
+    (
+        set -o pipefail
+        printf '%08x%08x' "$width" "$height" |
+            /usr/bin/xxd -r -p |
+            /usr/bin/base64 |
+            /usr/bin/tr -d '\n'
+    )
 }
 
 print_resolution_preview_mode() {
@@ -56,6 +92,10 @@ append_similar_resolution_preview_modes() {
         framebuffer_output="$(print_resolution_preview_mode "similar-framebuffer-${name}" "$framebuffer_width" "$framebuffer_height")" || return 1
         logical_payload="${logical_output##* payload=}"
         framebuffer_payload="${framebuffer_output##* payload=}"
+        if [[ "$logical_payload" == "$framebuffer_payload" ]]; then
+            printf 'error: smooth similar-resolution generation produced identical logical and framebuffer payloads\n' >&2
+            return 1
+        fi
         if data_payload_list_has_value "$known_payloads" "$logical_payload" ||
             data_payload_list_has_value "$known_payloads" "$framebuffer_payload"; then
             printf 'error: smooth similar-resolution generation produced duplicate payloads\n' >&2
