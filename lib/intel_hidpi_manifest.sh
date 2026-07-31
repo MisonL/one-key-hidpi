@@ -9,25 +9,16 @@ insert_manifest_payloads() {
     local candidate_hash="$5"
     local candidate_identity="$6"
     local payloads
-    local payload
-    local payload_count=0
+    local payload_array_xml
     local current_hash="$expected_hash"
     local current_identity="$expected_identity"
 
-    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert payloads -array || return 1
+    payloads="$(verified_scale_payloads_from_override "$candidate_path" "$candidate_hash" "$candidate_identity")" || return 1
+    payload_array_xml="$(plist_string_array_xml_from_payloads "$payloads")" || return 1
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" \
+        -insert payloads -xml "$payload_array_xml" || return 1
     current_hash="$PLIST_OPERATION_HASH"
     current_identity="$PLIST_OPERATION_IDENTITY"
-    payloads="$(verified_scale_payloads_from_override "$candidate_path" "$candidate_hash" "$candidate_identity")" || return 1
-
-    while IFS= read -r payload; do
-        [[ -n "$payload" ]] || continue
-        run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert "payloads.${payload_count}" -string "$payload" || return 1
-        current_hash="$PLIST_OPERATION_HASH"
-        current_identity="$PLIST_OPERATION_IDENTITY"
-        payload_count=$((payload_count + 1))
-    done <<< "$payloads"
-
-    ((payload_count > 0)) || return 1
     PLIST_OPERATION_HASH="$current_hash"
     PLIST_OPERATION_IDENTITY="$current_identity"
 }
@@ -48,6 +39,7 @@ write_manifest() {
     local expected_identity="${13}"
     local mode_set="${14:-$MODE_SET_PRESET}"
     local include_near_native="${15:-false}"
+    local include_similar_resolutions="${16:-false}"
     local current_hash="$expected_hash"
     local current_identity="$expected_identity"
     local boot_session
@@ -55,7 +47,7 @@ write_manifest() {
     valid_sha256 "$expected_hash" || return 1
     valid_file_identity "$expected_identity" || return 1
     valid_file_identity "$candidate_identity" || return 1
-    validate_mode_configuration "$mode_set" "$include_near_native" || return 1
+    validate_mode_configuration "$mode_set" "$include_near_native" "$include_similar_resolutions" || return 1
     boot_session="$(current_boot_session)" || return 1
     [[ "$boot_session" =~ ^[0-9]+:[0-9]+$ ]] || return 1
     run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -create xml1 || return 1
@@ -89,6 +81,9 @@ write_manifest() {
     current_hash="$PLIST_OPERATION_HASH"
     current_identity="$PLIST_OPERATION_IDENTITY"
     run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert include-near-native -bool "$include_near_native" || return 1
+    current_hash="$PLIST_OPERATION_HASH"
+    current_identity="$PLIST_OPERATION_IDENTITY"
+    run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert include-similar-resolutions -bool "$include_similar_resolutions" || return 1
     current_hash="$PLIST_OPERATION_HASH"
     current_identity="$PLIST_OPERATION_IDENTITY"
     run_plutil_and_update_hash "$manifest_path" "$current_hash" "$current_identity" -insert original-sha256 -string "$original_hash" || return 1

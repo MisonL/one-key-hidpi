@@ -51,6 +51,9 @@ menu_preview_output="$(
     langIntelSafeNearNative="Add a near-native compatibility mode?" \
     langIntelSafeNearNativeNo="(1) No" \
     langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeSimilarResolutions="Add BetterDisplay-compatible similar resolutions?" \
+    langIntelSafeSimilarResolutionsNo="(1) No" \
+    langIntelSafeSimilarResolutionsYes="(2) Yes" \
     langIntelSafeApply="(1) Apply generated modes" \
     langIntelSafeRevert="(2) Revert generated modes" \
     langIntelSafeCancel="(3) Cancel" \
@@ -75,6 +78,9 @@ menu_smooth_preview_output="$(
     langIntelSafeNearNative="Add a near-native compatibility mode?" \
     langIntelSafeNearNativeNo="(1) No" \
     langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeSimilarResolutions="Add BetterDisplay-compatible similar resolutions?" \
+    langIntelSafeSimilarResolutionsNo="(1) No" \
+    langIntelSafeSimilarResolutionsYes="(2) Yes" \
     langIntelSafeApply="(1) Apply generated modes" \
     langIntelSafeRevert="(2) Revert generated modes" \
     langIntelSafeCancel="(3) Cancel" \
@@ -83,7 +89,7 @@ menu_smooth_preview_output="$(
     langIntelSafeRevertConfirm="Type REVERT" \
     langIntelSafeCancelled="Cancelled" \
     langIntelSafeToolMissing="Tool is missing" \
-    /bin/bash -c 'source "$1"; printf "2\\n2\\n3\\n" | intel_safe_hidpi "$2" "$3" "$4" "$5"' bash \
+    /bin/bash -c 'source "$1"; printf "2\\n2\\n2\\n3\\n" | intel_safe_hidpi "$2" "$3" "$4" "$5"' bash \
         "$menu_library" "$tool_path" "$first_edid" 30ae 62a5
 )" || fail "smooth preview and cancel flow should succeed"
 assert_contains "$menu_smooth_preview_output" "smooth-01: 1280x720 framebuffer=2560x1440 payload="
@@ -136,6 +142,9 @@ menu_apply_output="$(
     langIntelSafeNearNative="Add a near-native compatibility mode?" \
     langIntelSafeNearNativeNo="(1) No" \
     langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeSimilarResolutions="Add BetterDisplay-compatible similar resolutions?" \
+    langIntelSafeSimilarResolutionsNo="(1) No" \
+    langIntelSafeSimilarResolutionsYes="(2) Yes" \
     langIntelSafeApply="(1) Apply generated modes" \
     langIntelSafeRevert="(2) Revert generated modes" \
     langIntelSafeCancel="(3) Cancel" \
@@ -144,13 +153,13 @@ menu_apply_output="$(
     langIntelSafeRevertConfirm="Type REVERT" \
     langIntelSafeCancelled="Cancelled" \
     langIntelSafeToolMissing="Tool is missing" \
-    /bin/bash -c 'source "$1"; intel_safe_hidpi_has_root_privilege() { return 0; }; printf "2\\n2\\n1\\nAPPLY\\n" | intel_safe_hidpi "$2" test-edid 30ae 62a5' bash \
+    /bin/bash -c 'source "$1"; intel_safe_hidpi_has_root_privilege() { return 0; }; printf "2\\n2\\n2\\n1\\nAPPLY\\n" | intel_safe_hidpi "$2" test-edid 30ae 62a5' bash \
         "$menu_library" "$menu_tool_path"
 )" || fail "smooth apply forwarding fixture should succeed"
 assert_contains "$menu_apply_output" "apply fixture"
 menu_tool_calls="$(/bin/cat "$menu_tool_trace")" || fail "could not read menu tool trace"
-assert_contains "$menu_tool_calls" "preview --native-resolution 1920x1080 --mode-set smooth --include-near-native"
-assert_contains "$menu_tool_calls" "apply --vendor-id 30ae --product-id 62a5 --native-resolution 1920x1080 --mode-set smooth --include-near-native --confirm"
+assert_contains "$menu_tool_calls" "preview --native-resolution 1920x1080 --mode-set smooth --include-near-native --include-similar-resolutions"
+assert_contains "$menu_tool_calls" "apply --vendor-id 30ae --product-id 62a5 --native-resolution 1920x1080 --mode-set smooth --include-near-native --include-similar-resolutions --confirm"
 
 : > "$menu_tool_trace"
 menu_revert_output="$(
@@ -163,6 +172,9 @@ menu_revert_output="$(
     langIntelSafeNearNative="Add a near-native compatibility mode?" \
     langIntelSafeNearNativeNo="(1) No" \
     langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeSimilarResolutions="Add BetterDisplay-compatible similar resolutions?" \
+    langIntelSafeSimilarResolutionsNo="(1) No" \
+    langIntelSafeSimilarResolutionsYes="(2) Yes" \
     langIntelSafeApply="(1) Apply generated modes" \
     langIntelSafeRevert="(2) Revert generated modes" \
     langIntelSafeCancel="(3) Cancel" \
@@ -191,6 +203,9 @@ confirmation_cancel_output="$(
     langIntelSafeNearNative="Add a near-native compatibility mode?" \
     langIntelSafeNearNativeNo="(1) No" \
     langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeSimilarResolutions="Add BetterDisplay-compatible similar resolutions?" \
+    langIntelSafeSimilarResolutionsNo="(1) No" \
+    langIntelSafeSimilarResolutionsYes="(2) Yes" \
     langIntelSafeApply="(1) Apply generated modes" \
     langIntelSafeRevert="(2) Revert generated modes" \
     langIntelSafeCancel="(3) Cancel" \
@@ -215,9 +230,12 @@ if ((EUID != 0)); then
         langIntelSafeTitle="Intel safe HiDPI" \
         langIntelSafeModePreset="(1) Compatibility preset modes" \
         langIntelSafeModeSmooth="(2) Smooth HiDPI modes" \
-        langIntelSafeNearNative="Add a near-native compatibility mode?" \
-        langIntelSafeNearNativeNo="(1) No" \
-        langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeNearNative="Add a near-native compatibility mode?" \
+    langIntelSafeNearNativeNo="(1) No" \
+    langIntelSafeNearNativeYes="(2) Yes" \
+    langIntelSafeSimilarResolutions="Add BetterDisplay-compatible similar resolutions?" \
+    langIntelSafeSimilarResolutionsNo="(1) No" \
+    langIntelSafeSimilarResolutionsYes="(2) Yes" \
         langIntelSafeApply="(1) Apply generated modes" \
         langIntelSafeRevert="(2) Revert generated modes" \
         langIntelSafeCancel="(3) Cancel" \

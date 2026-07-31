@@ -15,6 +15,8 @@ INTEL_HIDPI_STORAGE_LIB_DIR="$(builtin cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}
 source "${INTEL_HIDPI_STORAGE_LIB_DIR}/intel_hidpi_mode_configuration.sh" || return 1
 # shellcheck source=lib/intel_hidpi_darwin_fs.sh
 source "${INTEL_HIDPI_STORAGE_LIB_DIR}/intel_hidpi_darwin_fs.sh" || return 1
+# shellcheck source=lib/intel_hidpi_plist_arrays.sh
+source "${INTEL_HIDPI_STORAGE_LIB_DIR}/intel_hidpi_plist_arrays.sh" || return 1
 # shellcheck source=lib/intel_hidpi_manifest.sh
 source "${INTEL_HIDPI_STORAGE_LIB_DIR}/intel_hidpi_manifest.sh" || return 1
 unset INTEL_HIDPI_STORAGE_LIB_DIR
@@ -521,15 +523,8 @@ verified_scale_payloads_from_override() {
     local expected_identity="$3"
     local payload_xml
 
-    payload_xml="$(darwin_read_plist_file "$override_path" "$expected_hash" "$expected_identity" \
-        -extract scale-resolutions xml1 -expect array -o -)" || return 1
-    printf '%s\n' "$payload_xml" | /usr/bin/perl -0ne '
-        while (m{<data>(.*?)</data>}sg) {
-            $value = $1;
-            $value =~ s/\s+//g;
-            print "$value\n" if length $value;
-        }
-    '
+    payload_xml="$(scale_resolutions_xml_from_override "$override_path" "$expected_hash" "$expected_identity")" || return 1
+    data_payloads_from_plist_array_xml "$payload_xml"
 }
 
 payloads_for_resolution() {
@@ -537,9 +532,10 @@ payloads_for_resolution() {
     local framebuffer_limit="$2"
     local mode_set="${3:-$MODE_SET_PRESET}"
     local include_near_native="${4:-false}"
+    local include_similar_resolutions="${5:-false}"
     local preview_output
 
-    preview_output="$(preview "$native_resolution" "$framebuffer_limit" "$mode_set" "$include_near_native")" || return 1
+    preview_output="$(preview "$native_resolution" "$framebuffer_limit" "$mode_set" "$include_near_native" "$include_similar_resolutions")" || return 1
     printf '%s\n' "$preview_output" | /usr/bin/sed -n 's/.* payload=\([A-Za-z0-9+\/]*=*\)$/\1/p'
 }
 
@@ -565,9 +561,10 @@ append_missing_payloads() {
     local generated_payloads="$2"
     local expected_hash="$3"
     local expected_identity="$4"
-    local payload
+    local scale_resolutions_xml
+    local updated_scale_resolutions_xml
     local existing_payloads
-    local payload_count
+    local missing_payload_status=0
     local current_hash="$expected_hash"
     local current_identity="$expected_identity"
 
@@ -576,19 +573,28 @@ append_missing_payloads() {
     current_hash="$PLIST_OPERATION_HASH"
     current_identity="$PLIST_OPERATION_IDENTITY"
     file_matches_snapshot "$candidate_path" "$current_hash" "$current_identity" || return 1
-    existing_payloads="$(verified_scale_payloads_from_override "$candidate_path" "$current_hash" "$current_identity")" || return 1
-    payload_count="$(plist_raw_value "$candidate_path" "$current_hash" "$current_identity" scale-resolutions array)" || return 1
-
-    while IFS= read -r payload; do
-        [[ -n "$payload" ]] || continue
-        if ! printf '%s\n' "$existing_payloads" | /usr/bin/grep -Fqx "$payload"; then
-            run_plutil_and_update_hash "$candidate_path" "$current_hash" "$current_identity" -insert "scale-resolutions.${payload_count}" -data "$payload" || return 1
-            current_hash="$PLIST_OPERATION_HASH"
-            current_identity="$PLIST_OPERATION_IDENTITY"
-            existing_payloads="${existing_payloads}${existing_payloads:+$'\n'}${payload}"
-            payload_count=$((payload_count + 1))
-        fi
-    done <<< "$generated_payloads"
+    scale_resolutions_xml="$(scale_resolutions_xml_from_override "$candidate_path" "$current_hash" "$current_identity")" || return 1
+    existing_payloads="$(data_payloads_from_plist_array_xml "$scale_resolutions_xml")" || return 1
+    data_payload_list_has_missing_value "$existing_payloads" "$generated_payloads" || missing_payload_status=$?
+    case "$missing_payload_status" in
+    0)
+        ;;
+    1)
+        PLIST_OPERATION_HASH="$current_hash"
+        PLIST_OPERATION_IDENTITY="$current_identity"
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+    updated_scale_resolutions_xml="$(append_missing_data_payloads_to_plist_array_xml "$scale_resolutions_xml" "$generated_payloads")" || return 1
+    if [[ "$updated_scale_resolutions_xml" != "$scale_resolutions_xml" ]]; then
+        run_plutil_and_update_hash "$candidate_path" "$current_hash" "$current_identity" \
+            -replace scale-resolutions -xml "$updated_scale_resolutions_xml" || return 1
+        current_hash="$PLIST_OPERATION_HASH"
+        current_identity="$PLIST_OPERATION_IDENTITY"
+    fi
     PLIST_OPERATION_HASH="$current_hash"
     PLIST_OPERATION_IDENTITY="$current_identity"
 }

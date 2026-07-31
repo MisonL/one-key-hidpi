@@ -41,8 +41,11 @@
 本地菜单提供 `preset` 兼容模式和更密集的 `smooth` 模式集。`smooth` 按显示器原生宽高比，
 从不低于原生尺寸三分之二的位置生成到原生尺寸，最多 41 档。确有需要时可以明确加入
 近原生兼容模式。
-将预览结果应用到 override 时，`apply` 必须复用预览所用的 `--mode-set` 和
-`--include-near-native` 参数；不同选择会有意生成不同的候选模式集。
+在 `smooth` 模式下，还可以显式加入与 BetterDisplay override 布局兼容的相似分辨率：
+每个 HiDPI 候选额外加入逻辑分辨率和对应 2x framebuffer 分辨率各一个普通 payload。
+该选项用于兼容已观察到的 BetterDisplay override 布局，不代表实现了连续实时缩放。
+将预览结果应用到 override 时，`apply` 必须复用预览所用的 `--mode-set`、
+`--include-near-native` 和 `--include-similar-resolutions` 参数；不同选择会有意生成不同的候选模式集。
 
 应用或回退都要求以 root 身份启动，并输入精确的 `APPLY` 或 `REVERT` 确认词：
 
@@ -58,18 +61,36 @@ sudo ./hidpi.sh
 
 ```bash
 ./intel-hidpi.sh preview --native-resolution 1920x1080 --mode-set smooth \
-  --include-near-native
+  --include-near-native --include-similar-resolutions
 ```
 
-在 macOS 已经暴露目标显示器模式后，可以只读验收该精确目标：
+可以先只读核验目标 override 的 payload 集合：
+
+```bash
+./intel-hidpi.sh verify-override --vendor-id <供应商ID> --product-id <产品ID> \
+  --native-resolution <宽>x<高> --mode-set smooth --include-near-native \
+  --include-similar-resolutions
+```
+
+`verify-override` 只检查目标 plist 中直接位于 `scale-resolutions` 数组内的唯一 data
+payload 集合。只有集合严格相等时才返回 `0`；它会单独报告重复的直接 data 条目，并在存在缺失
+或额外 payload 时返回 `2`。
+
+再单独只读核验 CoreGraphics 实际暴露给目标显示器的模式：
 
 ```bash
 ./intel-hidpi.sh verify-modes --vendor-id <供应商ID> --product-id <产品ID> \
-  --native-resolution <宽>x<高> --mode-set smooth --include-near-native
+  --native-resolution <宽>x<高> --mode-set smooth --include-near-native \
+  --include-similar-resolutions
 ```
 
-`verify-modes` 会同时比对逻辑分辨率和所需的 2x framebuffer。完整命中返回 `0`，部分缺失
-返回 `2`。使用 `--modes-file` 时只校验离线捕获记录，不能证明当前显示器状态。
+`verify-modes` 会同时比对逻辑分辨率和 framebuffer。普通相似分辨率记录有意使用相同的逻辑
+分辨率和 framebuffer。完整命中返回 `0`，部分缺失返回 `2`。使用 `--modes-file` 时只校验离线
+捕获记录，不能证明当前显示器状态。
+
+两种核验回答的问题不同：`verify-override` 通过只能证明 override payload 配置正确，不能证明
+macOS 会把每个 payload 接受并暴露为运行时模式；`verify-modes` 通过只能证明枚举到相应的模式对，
+不能证明它们来自当前 override 文件。
 
 ## 精确回退
 

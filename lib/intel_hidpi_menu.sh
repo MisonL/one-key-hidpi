@@ -14,8 +14,10 @@ intel_safe_hidpi() {
     local confirmation
     local mode_set
     local include_near_native=false
+    local include_similar_resolutions=false
     local mode_choice
     local near_native_choice
+    local similar_resolutions_choice
     local mode_arguments=()
 
     [[ -f "$tool_path" ]] || {
@@ -54,6 +56,22 @@ intel_safe_hidpi() {
             return 1
             ;;
         esac
+        echo "$langIntelSafeSimilarResolutions"
+        echo "$langIntelSafeSimilarResolutionsNo"
+        echo "$langIntelSafeSimilarResolutionsYes"
+        echo ""
+        read -r -p "${langInputChoice} [1~2]: " similar_resolutions_choice
+        case "$similar_resolutions_choice" in
+        1)
+            ;;
+        2)
+            include_similar_resolutions=true
+            ;;
+        *)
+            echo "$langEnterError"
+            return 1
+            ;;
+        esac
         ;;
     3)
         echo "$langIntelSafeCancelled"
@@ -68,6 +86,9 @@ intel_safe_hidpi() {
     mode_arguments=(--mode-set "$mode_set")
     if [[ "$include_near_native" == true ]]; then
         mode_arguments+=(--include-near-native)
+    fi
+    if [[ "$include_similar_resolutions" == true ]]; then
+        mode_arguments+=(--include-similar-resolutions)
     fi
     /bin/bash "$tool_path" preview --native-resolution "$native_resolution" "${mode_arguments[@]}" || return 1
 

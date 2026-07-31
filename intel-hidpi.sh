@@ -18,9 +18,10 @@ usage() {
 Usage:
   intel-hidpi.sh inventory [--ioreg-file PATH] [--overrides-root PATH]
   intel-hidpi.sh native-resolution --edid HEX
-  intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS] [--mode-set preset|smooth] [--include-near-native]
-  intel-hidpi.sh verify-modes --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--mode-set preset|smooth] [--include-near-native] [--modes-file PATH]
-  intel-hidpi.sh apply --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--mode-set preset|smooth] [--include-near-native] [--overrides-root PATH] [--state-root PATH] --confirm
+  intel-hidpi.sh preview --native-resolution WIDTHxHEIGHT [--framebuffer-limit PIXELS] [--mode-set preset|smooth] [--include-near-native] [--include-similar-resolutions]
+  intel-hidpi.sh verify-modes --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--mode-set preset|smooth] [--include-near-native] [--include-similar-resolutions] [--modes-file PATH]
+  intel-hidpi.sh verify-override --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--mode-set preset|smooth] [--include-near-native] [--include-similar-resolutions] [--overrides-root PATH]
+  intel-hidpi.sh apply --vendor-id HEX --product-id HEX --native-resolution WIDTHxHEIGHT [--mode-set preset|smooth] [--include-near-native] [--include-similar-resolutions] [--overrides-root PATH] [--state-root PATH] --confirm
   intel-hidpi.sh revert --vendor-id HEX --product-id HEX [--overrides-root PATH] [--state-root PATH] [--migrate-v4] --confirm
 
 Commands:
@@ -30,6 +31,8 @@ Commands:
   preview    Generate candidate 2x HiDPI modes without writing an override.
   verify-modes  Read modes for exactly one connected display and report whether
                 every generated candidate is exposed with its 2x framebuffer.
+  verify-override  Read one target override and report whether its payload set
+                   contains every generated candidate. This command never writes files.
   apply      Merge generated modes into one target override after confirmation.
   revert     Restore or remove only the target override recorded by apply.
              Legacy v4 state requires the explicit --migrate-v4 acknowledgment.
@@ -148,7 +151,10 @@ require_complete_local_checkout() {
         "${SCRIPT_DIR}/lib/intel_hidpi_storage_support.sh" \
         "${SCRIPT_DIR}/lib/intel_hidpi_mode_configuration.sh" \
         "${SCRIPT_DIR}/lib/intel_hidpi_darwin_fs.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_plist_arrays.sh" \
         "${SCRIPT_DIR}/lib/intel_hidpi_manifest.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_similar_resolutions.sh" \
+        "${SCRIPT_DIR}/lib/intel_hidpi_verify_override.sh" \
         "${SCRIPT_DIR}/lib/intel_hidpi_verify_modes.sh" \
         "${SCRIPT_DIR}/lib/intel_hidpi_runtime_modes.swift"; do
         [[ -f "$required_path" && ! -L "$required_path" && -r "$required_path" ]] ||
@@ -161,6 +167,8 @@ require_complete_local_checkout
 source "${SCRIPT_DIR}/lib/intel_hidpi_storage.sh" || fail "could not load Intel HiDPI storage helpers"
 # shellcheck source=lib/intel_hidpi_verify_modes.sh
 source "${SCRIPT_DIR}/lib/intel_hidpi_verify_modes.sh" || fail "could not load Intel HiDPI runtime verification helpers"
+# shellcheck source=lib/intel_hidpi_verify_override.sh
+source "${SCRIPT_DIR}/lib/intel_hidpi_verify_override.sh" || fail "could not load Intel HiDPI override verification helpers"
 
 print_hidpi_preview_mode() {
     local name="$1"
@@ -183,6 +191,9 @@ print_hidpi_preview_mode() {
     printf '%s: %sx%s framebuffer=%sx%s payload=%s\n' \
         "$name" "$logical_width" "$logical_height" "$framebuffer_width" "$framebuffer_height" "$payload"
 }
+
+# shellcheck source=lib/intel_hidpi_similar_resolutions.sh
+source "${SCRIPT_DIR}/lib/intel_hidpi_similar_resolutions.sh" || fail "could not load Intel HiDPI similar-resolution helpers"
 
 print_preview_mode() {
     local name="$1"
@@ -284,6 +295,7 @@ preview() {
     local framebuffer_limit="$2"
     local mode_set="${3:-$MODE_SET_PRESET}"
     local include_near_native="${4:-false}"
+    local include_similar_resolutions="${5:-false}"
     local parsed_resolution
     local native_width
     local native_height
@@ -291,7 +303,7 @@ preview() {
 
     decimal_at_most "$framebuffer_limit" "$DEFAULT_FRAMEBUFFER_LIMIT" || fail "framebuffer limit must be a positive integer no greater than ${DEFAULT_FRAMEBUFFER_LIMIT}"
     parsed_resolution="$(parse_resolution "$native_resolution")" || fail "native resolution must use positive WIDTHxHEIGHT values"
-    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
+    validate_mode_configuration "$mode_set" "$include_near_native" "$include_similar_resolutions" || fail "mode set or compatibility configuration is invalid"
     native_width="${parsed_resolution%%:*}"
     native_height="${parsed_resolution##*:}"
 
@@ -303,6 +315,10 @@ preview() {
         preview_output="$(generate_smooth_preview_modes "$native_width" "$native_height" "$framebuffer_limit" "$include_near_native")" || return 1
         ;;
     esac
+
+    if [[ "$include_similar_resolutions" == true ]]; then
+        preview_output="$(append_similar_resolution_preview_modes "$preview_output")" || return 1
+    fi
 
     printf '%s\n' "$preview_output"
 }
@@ -538,8 +554,10 @@ run_preview_command() {
     local framebuffer_limit="$DEFAULT_FRAMEBUFFER_LIMIT"
     local mode_set="$MODE_SET_PRESET"
     local include_near_native=false
+    local include_similar_resolutions=false
     local mode_set_provided=false
     local near_native_provided=false
+    local similar_resolutions_provided=false
 
     while (($# > 0)); do
         case "$1" in
@@ -566,6 +584,12 @@ run_preview_command() {
             near_native_provided=true
             shift
             ;;
+        --include-similar-resolutions)
+            [[ "$similar_resolutions_provided" == false ]] || fail "--include-similar-resolutions may only be provided once"
+            include_similar_resolutions=true
+            similar_resolutions_provided=true
+            shift
+            ;;
         *)
             fail "unknown preview option: $1"
             ;;
@@ -573,7 +597,7 @@ run_preview_command() {
     done
 
     [[ -n "$native_resolution" ]] || fail "--native-resolution is required"
-    preview "$native_resolution" "$framebuffer_limit" "$mode_set" "$include_near_native"
+    preview "$native_resolution" "$framebuffer_limit" "$mode_set" "$include_near_native" "$include_similar_resolutions"
 }
 
 run_native_resolution_command() {
@@ -605,8 +629,10 @@ run_apply_command() {
     local confirmed=false
     local mode_set="$MODE_SET_PRESET"
     local include_near_native=false
+    local include_similar_resolutions=false
     local mode_set_provided=false
     local near_native_provided=false
+    local similar_resolutions_provided=false
 
     while (($# > 0)); do
         case "$1" in
@@ -648,6 +674,12 @@ run_apply_command() {
             near_native_provided=true
             shift
             ;;
+        --include-similar-resolutions)
+            [[ "$similar_resolutions_provided" == false ]] || fail "--include-similar-resolutions may only be provided once"
+            include_similar_resolutions=true
+            similar_resolutions_provided=true
+            shift
+            ;;
         --confirm)
             confirmed=true
             shift
@@ -659,8 +691,8 @@ run_apply_command() {
     done
 
     [[ -n "$vendor_id" && -n "$product_id" && -n "$native_resolution" ]] || fail "apply requires vendor id, product id, and native resolution"
-    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
-    apply_override "$vendor_id" "$product_id" "$native_resolution" "$overrides_root" "$state_root" "$confirmed" "$mode_set" "$include_near_native"
+    validate_mode_configuration "$mode_set" "$include_near_native" "$include_similar_resolutions" || fail "mode set or compatibility configuration is invalid"
+    apply_override "$vendor_id" "$product_id" "$native_resolution" "$overrides_root" "$state_root" "$confirmed" "$mode_set" "$include_near_native" "$include_similar_resolutions"
 }
 
 run_revert_command() {
@@ -726,6 +758,10 @@ main() {
     verify-modes)
         shift
         run_verify_modes_command "$@"
+        ;;
+    verify-override)
+        shift
+        run_verify_override_command "$@"
         ;;
     native-resolution)
         shift

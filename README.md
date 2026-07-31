@@ -48,9 +48,13 @@ The local menu offers `preset` compatibility modes and a denser `smooth` mode
 set. `smooth` uses the native display aspect ratio from two-thirds of native
 through native size, with no more than 41 candidates. You may explicitly add a
 near-native compatibility mode when it is appropriate for the selected panel.
-When applying a previewed selection, pass the same `--mode-set` and
-`--include-near-native` options to `apply`; a different selection intentionally
-produces a different candidate set.
+For an explicit BetterDisplay-compatible set, `smooth` can also add two ordinary
+resolution payloads for every HiDPI candidate: the logical resolution and its
+2x framebuffer resolution. This option is intended for compatibility with the
+observed BetterDisplay override layout, not as a claim of flexible live scaling.
+When applying a previewed selection, pass the same `--mode-set`,
+`--include-near-native`, and `--include-similar-resolutions` options to `apply`;
+a different selection intentionally produces a different candidate set.
 
 Applying or reverting requires a root invocation and the exact `APPLY` or
 `REVERT` confirmation word:
@@ -68,21 +72,41 @@ Generate candidates without writing an override:
 
 ```bash
 ./intel-hidpi.sh preview --native-resolution 1920x1080 --mode-set smooth \
-  --include-near-native
+  --include-near-native --include-similar-resolutions
 ```
 
-After macOS exposes the selected display's modes, verify the exact target in a
-read-only operation:
+Verify the selected override's payload set in a read-only operation:
+
+```bash
+./intel-hidpi.sh verify-override --vendor-id <vendor-id> --product-id <product-id> \
+  --native-resolution <width>x<height> --mode-set smooth --include-near-native \
+  --include-similar-resolutions
+```
+
+`verify-override` checks the unique direct `scale-resolutions` data payload
+set in the target plist. It returns `0` only when that set matches exactly,
+reports duplicate direct data entries separately, and returns `2` when there
+are missing or extra payloads.
+
+Verify the modes that CoreGraphics actually exposes for the selected display in
+a separate read-only operation:
 
 ```bash
 ./intel-hidpi.sh verify-modes --vendor-id <vendor-id> --product-id <product-id> \
-  --native-resolution <width>x<height> --mode-set smooth --include-near-native
+  --native-resolution <width>x<height> --mode-set smooth --include-near-native \
+  --include-similar-resolutions
 ```
 
-`verify-modes` compares both logical dimensions and the required 2x
-framebuffer. It returns `0` for a complete result and `2` when some generated
-modes are missing. With `--modes-file`, it validates an offline capture only;
-that result is not evidence of the current display state.
+`verify-modes` compares both logical dimensions and framebuffer dimensions. The
+ordinary similar-resolution records intentionally use identical logical and
+framebuffer dimensions. It returns `0` for a complete result and `2` when some
+generated modes are missing. With `--modes-file`, it validates an offline
+capture only; that result is not evidence of the current display state.
+
+The two checks answer different questions. A passing `verify-override` proves
+the override payload configuration, not that macOS accepted every payload as a
+live mode. A passing `verify-modes` proves the enumerated mode pairs, not that
+they came from this override file.
 
 ## Recovery
 

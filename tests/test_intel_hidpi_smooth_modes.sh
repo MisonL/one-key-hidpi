@@ -3,6 +3,7 @@
 set -u
 
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
+betterdisplay_payload_fixture="${repo_dir}/tests/fixtures/betterdisplay-1920x1080-payloads.txt"
 
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -22,7 +23,7 @@ assert_document_contains() {
     local document_path="$1"
     local expected="$2"
 
-    /usr/bin/grep -Fq "$expected" "$document_path" || fail "missing documentation text in ${document_path}: ${expected}"
+    /usr/bin/grep -Fq -- "$expected" "$document_path" || fail "missing documentation text in ${document_path}: ${expected}"
 }
 
 assert_not_contains() {
@@ -69,6 +70,36 @@ assert_unique_logical_resolutions() {
     [[ "$mode_count" == "$unique_count" ]] || fail "smooth mode generation must not duplicate logical resolutions"
 }
 
+assert_unique_payloads() {
+    local preview="$1"
+    local expected_count="$2"
+    local payload_count
+    local unique_count
+
+    payload_count="$(printf '%s\n' "$preview" | /usr/bin/sed -n 's/.* payload=\([A-Za-z0-9+\/]*=*\)$/\1/p' | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+    unique_count="$(printf '%s\n' "$preview" | /usr/bin/sed -n 's/.* payload=\([A-Za-z0-9+\/]*=*\)$/\1/p' | /usr/bin/sort -u | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+    [[ "$payload_count" == "$expected_count" ]] || fail "expected ${expected_count} payloads, got ${payload_count}"
+    [[ "$payload_count" == "$unique_count" ]] || fail "generated payloads must be unique"
+}
+
+assert_payload_set_sha256() {
+    local preview="$1"
+    local expected_hash="$2"
+    local actual_hash
+
+    actual_hash="$(printf '%s\n' "$preview" | /usr/bin/sed -n 's/.* payload=\([A-Za-z0-9+\/]*=*\)$/\1/p' | /usr/bin/sort -u | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+    [[ "$actual_hash" == "$expected_hash" ]] || fail "unexpected normalized payload set SHA-256: ${actual_hash}"
+}
+
+assert_payload_set_matches_fixture() {
+    local preview="$1"
+    local actual_payloads
+
+    [[ -f "$betterdisplay_payload_fixture" && ! -L "$betterdisplay_payload_fixture" ]] || fail "missing BetterDisplay payload fixture"
+    actual_payloads="$(printf '%s\n' "$preview" | /usr/bin/sed -n 's/.* payload=\([A-Za-z0-9+\/]*=*\)$/\1/p' | /usr/bin/sort -u)"
+    /usr/bin/diff -u "$betterdisplay_payload_fixture" <(printf '%s\n' "$actual_payloads") || fail "generated payload set differs from the BetterDisplay fixture"
+}
+
 smooth_preview="$("${repo_dir}/intel-hidpi.sh" preview \
     --native-resolution 1920x1080 \
     --mode-set smooth)" || fail "smooth preview should succeed"
@@ -86,6 +117,24 @@ near_native_preview="$("${repo_dir}/intel-hidpi.sh" preview \
     --include-near-native)" || fail "smooth preview with near-native mode should succeed"
 assert_line_count "$near_native_preview" 42
 assert_contains "$near_native_preview" "near-native: 1920x1079 framebuffer=3840x2158 payload=AAAPAAAACG4AAAABACAAAA=="
+
+similar_preview="$("${repo_dir}/intel-hidpi.sh" preview \
+    --native-resolution 1920x1080 \
+    --mode-set smooth \
+    --include-near-native \
+    --include-similar-resolutions)" || fail "smooth preview with BetterDisplay-compatible similar resolutions should succeed"
+assert_line_count "$similar_preview" 126
+assert_contains "$similar_preview" "smooth-01: 1280x720 framebuffer=2560x1440 payload=AAAKAAAABaAAAAABACAAAA=="
+assert_contains "$similar_preview" "near-native: 1920x1079 framebuffer=3840x2158 payload=AAAPAAAACG4AAAABACAAAA=="
+assert_contains "$similar_preview" "similar-logical-smooth-01: 1280x720 framebuffer=1280x720 payload=AAAFAAAAAtA="
+assert_contains "$similar_preview" "similar-framebuffer-smooth-01: 2560x1440 framebuffer=2560x1440 payload=AAAKAAAABaA="
+assert_contains "$similar_preview" "similar-logical-near-native: 1920x1079 framebuffer=1920x1079 payload=AAAHgAAABDc="
+assert_contains "$similar_preview" "similar-framebuffer-near-native: 3840x2158 framebuffer=3840x2158 payload=AAAPAAAACG4="
+assert_unique_payloads "$similar_preview" 126
+assert_payload_set_sha256 "$similar_preview" "cf26372047fc80933bd980571ada7eaf30d9c7ac9114a3b6fc98e83a3b161c0b"
+assert_payload_set_matches_fixture "$similar_preview"
+assert_document_contains "${repo_dir}/README.md" "--include-similar-resolutions"
+assert_document_contains "${repo_dir}/README-zh.md" "--include-similar-resolutions"
 
 ultrawide_preview="$("${repo_dir}/intel-hidpi.sh" preview \
     --native-resolution 3440x1440 \
@@ -150,13 +199,32 @@ if duplicate_near_native_output="$("${repo_dir}/intel-hidpi.sh" preview \
 fi
 assert_contains "$duplicate_near_native_output" "error: --include-near-native may only be provided once"
 
+duplicate_similar_resolutions_output=""
+if duplicate_similar_resolutions_output="$("${repo_dir}/intel-hidpi.sh" preview \
+    --native-resolution 1920x1080 \
+    --mode-set smooth \
+    --include-similar-resolutions \
+    --include-similar-resolutions 2>&1)"; then
+    fail "duplicate similar-resolution options must fail explicitly"
+fi
+assert_contains "$duplicate_similar_resolutions_output" "error: --include-similar-resolutions may only be provided once"
+
+invalid_similar_configuration_output=""
+if invalid_similar_configuration_output="$("${repo_dir}/intel-hidpi.sh" preview \
+    --native-resolution 1920x1080 \
+    --mode-set preset \
+    --include-similar-resolutions 2>&1)"; then
+    fail "similar resolutions must require the smooth mode set"
+fi
+assert_contains "$invalid_similar_configuration_output" "error: mode set or compatibility configuration is invalid"
+
 invalid_mode_set_output=""
 if invalid_mode_set_output="$("${repo_dir}/intel-hidpi.sh" preview \
     --native-resolution 1920x1080 \
     --mode-set unsupported 2>&1)"; then
     fail "unsupported mode sets must fail explicitly"
 fi
-assert_contains "$invalid_mode_set_output" "error: mode set or near-native configuration is invalid"
+assert_contains "$invalid_mode_set_output" "error: mode set or compatibility configuration is invalid"
 
 maximum_framebuffer_output=""
 if maximum_framebuffer_output="$("${repo_dir}/intel-hidpi.sh" preview \

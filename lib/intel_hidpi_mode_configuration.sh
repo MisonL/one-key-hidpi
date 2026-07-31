@@ -8,7 +8,8 @@ readonly SMOOTH_MAX_MODE_COUNT=41
 
 validate_mode_configuration() {
     local mode_set="$1"
-    local include_near_native="$2"
+    local include_near_native="${2:-false}"
+    local include_similar_resolutions="${3:-false}"
 
     case "$mode_set" in
     "$MODE_SET_PRESET"|"$MODE_SET_SMOOTH")
@@ -18,5 +19,7 @@ validate_mode_configuration() {
         ;;
     esac
     [[ "$include_near_native" == true || "$include_near_native" == false ]] || return 1
-    [[ "$include_near_native" == false || "$mode_set" == "$MODE_SET_SMOOTH" ]]
+    [[ "$include_similar_resolutions" == true || "$include_similar_resolutions" == false ]] || return 1
+    [[ "$include_near_native" == false || "$mode_set" == "$MODE_SET_SMOOTH" ]] || return 1
+    [[ "$include_similar_resolutions" == false || "$mode_set" == "$MODE_SET_SMOOTH" ]]
 }

@@ -103,6 +103,7 @@ collect_generated_mode_records() {
     local native_resolution="$1"
     local mode_set="${2:-$MODE_SET_PRESET}"
     local include_near_native="${3:-false}"
+    local include_similar_resolutions="${4:-false}"
     local preview_output
     local line
     local name
@@ -111,20 +112,31 @@ collect_generated_mode_records() {
     local payload
 
     GENERATED_MODE_RECORDS=""
-    preview_output="$(preview "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" "$mode_set" "$include_near_native")" || return 1
+    preview_output="$(preview "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" "$mode_set" "$include_near_native" "$include_similar_resolutions")" || return 1
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^([a-z0-9-]+):\ ([1-9][0-9]*x[1-9][0-9]*)\ framebuffer=([1-9][0-9]*x[1-9][0-9]*)\ payload=([A-Za-z0-9+/]+={0,2})$ ]] || return 1
         name="${BASH_REMATCH[1]}"
         logical_resolution="${BASH_REMATCH[2]}"
         framebuffer_resolution="${BASH_REMATCH[3]}"
         payload="${BASH_REMATCH[4]}"
-        runtime_resolution_is_valid "$logical_resolution" "$MAX_NATIVE_DIMENSION" || return 1
+        runtime_resolution_is_valid "$logical_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" || return 1
         runtime_resolution_is_valid "$framebuffer_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" || return 1
         [[ -n "$payload" ]] || return 1
         GENERATED_MODE_RECORDS="${GENERATED_MODE_RECORDS}${GENERATED_MODE_RECORDS:+$'\n'}${name}|${logical_resolution}|${framebuffer_resolution}"
     done <<< "$preview_output"
 
     [[ -n "$GENERATED_MODE_RECORDS" ]]
+}
+
+runtime_mode_pair_is_observed() {
+    local logical_resolution="$1"
+    local framebuffer_resolution="$2"
+    local expected_pair
+    local bounded_runtime_pairs
+
+    expected_pair="${logical_resolution}|${framebuffer_resolution}"
+    bounded_runtime_pairs=$'\n'"${RUNTIME_MODE_PAIRS}"$'\n'
+    [[ "$bounded_runtime_pairs" == *$'\n'"${expected_pair}"$'\n'* ]]
 }
 
 verify_mode_capture() {
@@ -135,6 +147,7 @@ verify_mode_capture() {
     local capture_source="$5"
     local mode_set="${6:-$MODE_SET_PRESET}"
     local include_near_native="${7:-false}"
+    local include_similar_resolutions="${8:-false}"
     local capture_status=0
     local name
     local logical_resolution
@@ -150,8 +163,8 @@ verify_mode_capture() {
         ;;
     esac
 
-    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
-    collect_generated_mode_records "$native_resolution" "$mode_set" "$include_near_native" || fail "could not generate runtime verification candidates"
+    validate_mode_configuration "$mode_set" "$include_near_native" "$include_similar_resolutions" || fail "mode set or compatibility configuration is invalid"
+    collect_generated_mode_records "$native_resolution" "$mode_set" "$include_near_native" "$include_similar_resolutions" || fail "could not generate runtime verification candidates"
     parse_runtime_mode_capture "$capture" "$vendor_id" "$product_id" || capture_status=$?
     case "$capture_status" in
     0)
@@ -170,7 +183,7 @@ verify_mode_capture() {
     printf 'capture-source=%s\n' "$capture_source"
     printf 'target=%s:%s\n' "$vendor_id" "$product_id"
     while IFS='|' read -r name logical_resolution framebuffer_resolution; do
-        if printf '%s\n' "$RUNTIME_MODE_PAIRS" | /usr/bin/grep -Fqx "${logical_resolution}|${framebuffer_resolution}"; then
+        if runtime_mode_pair_is_observed "$logical_resolution" "$framebuffer_resolution"; then
             printf '%s: %s framebuffer=%s status=observed\n' "$name" "$logical_resolution" "$framebuffer_resolution"
             observed_count=$((observed_count + 1))
         else
@@ -195,12 +208,14 @@ run_verify_modes_command() {
     local modes_file=""
     local mode_set="$MODE_SET_PRESET"
     local include_near_native=false
+    local include_similar_resolutions=false
     local vendor_id_provided=false
     local product_id_provided=false
     local native_resolution_provided=false
     local modes_file_provided=false
     local mode_set_provided=false
     local near_native_provided=false
+    local similar_resolutions_provided=false
     local capture
     local capture_source="live-coregraphics"
     local capture_status=0
@@ -248,6 +263,12 @@ run_verify_modes_command() {
             near_native_provided=true
             shift
             ;;
+        --include-similar-resolutions)
+            [[ "$similar_resolutions_provided" == false ]] || fail "--include-similar-resolutions may only be provided once"
+            include_similar_resolutions=true
+            similar_resolutions_provided=true
+            shift
+            ;;
         *)
             fail "unknown verify-modes option: $1"
             ;;
@@ -258,7 +279,7 @@ run_verify_modes_command() {
     vendor_id="$(normalize_hex_id "$vendor_id")" || fail "vendor id is invalid"
     product_id="$(normalize_hex_id "$product_id")" || fail "product id is invalid"
     parse_resolution "$native_resolution" >/dev/null || fail "native resolution must use positive WIDTHxHEIGHT values"
-    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
+    validate_mode_configuration "$mode_set" "$include_near_native" "$include_similar_resolutions" || fail "mode set or compatibility configuration is invalid"
 
     if [[ "$modes_file_provided" == true ]]; then
         [[ -n "$modes_file" ]] || fail "--modes-file requires a regular file path"
@@ -281,5 +302,5 @@ run_verify_modes_command() {
         capture="$(capture_runtime_modes "$vendor_id" "$product_id")" || fail "could not capture target display modes"
     fi
 
-    verify_mode_capture "$vendor_id" "$product_id" "$native_resolution" "$capture" "$capture_source" "$mode_set" "$include_near_native"
+    verify_mode_capture "$vendor_id" "$product_id" "$native_resolution" "$capture" "$capture_source" "$mode_set" "$include_near_native" "$include_similar_resolutions"
 }

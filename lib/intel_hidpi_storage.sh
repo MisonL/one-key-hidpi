@@ -155,6 +155,7 @@ apply_override() {
     local confirmed="$6"
     local mode_set="${7:-$MODE_SET_PRESET}"
     local include_near_native="${8:-false}"
+    local include_similar_resolutions="${9:-false}"
     local apply_request
     local vendor_decimal
     local product_decimal
@@ -182,7 +183,7 @@ apply_override() {
 
     [[ "$confirmed" == true ]] || fail "apply requires --confirm"
     apply_request="$(parse_apply_request "$vendor_id" "$product_id" "$native_resolution")" || fail "vendor id, product id, or native resolution is invalid"
-    validate_mode_configuration "$mode_set" "$include_near_native" || fail "mode set or near-native configuration is invalid"
+    validate_mode_configuration "$mode_set" "$include_near_native" "$include_similar_resolutions" || fail "mode set or compatibility configuration is invalid"
     IFS='|' read -r vendor_id product_id vendor_decimal product_decimal <<< "$apply_request"
     overrides_root="$(normalize_storage_root "$overrides_root")" || fail "overrides root is invalid or traverses a symbolic link"
     state_root="$(normalize_storage_root "$state_root")" || fail "state root is invalid or traverses a symbolic link"
@@ -190,7 +191,7 @@ apply_override() {
     require_root_for_system_paths "$overrides_root" "$state_root"
     is_system_overrides_root "$overrides_root" && overrides_are_system_paths=true
     is_system_state_root "$state_root" && state_is_system_path=true
-    generated_payloads="$(payloads_for_resolution "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" "$mode_set" "$include_near_native")" || fail "could not generate modes for the requested configuration"
+    generated_payloads="$(payloads_for_resolution "$native_resolution" "$DEFAULT_FRAMEBUFFER_LIMIT" "$mode_set" "$include_near_native" "$include_similar_resolutions")" || fail "could not generate modes for the requested configuration"
     [[ -n "$generated_payloads" ]] || fail "could not generate modes for the requested configuration"
 
     target_path="$(path_for_display "$overrides_root" "$vendor_id" "$product_id")"
@@ -258,7 +259,7 @@ apply_override() {
     manifest_candidate_path="$TEMPORARY_FILE"
     manifest_candidate_hash="$(temporary_file_expected_hash "$manifest_candidate_path")" || fail "could not verify manifest candidate"
     manifest_candidate_identity="$(temporary_file_expected_identity "$manifest_candidate_path")" || fail "could not verify manifest candidate"
-    write_manifest "$manifest_candidate_path" "$candidate_path" "$overrides_root" "$target_relative" "$target_existed" "$vendor_id" "$product_id" "$native_resolution" "$original_hash" "$candidate_hash" "$candidate_identity" "$manifest_candidate_hash" "$manifest_candidate_identity" "$mode_set" "$include_near_native" || fail "could not write manifest"
+    write_manifest "$manifest_candidate_path" "$candidate_path" "$overrides_root" "$target_relative" "$target_existed" "$vendor_id" "$product_id" "$native_resolution" "$original_hash" "$candidate_hash" "$candidate_identity" "$manifest_candidate_hash" "$manifest_candidate_identity" "$mode_set" "$include_near_native" "$include_similar_resolutions" || fail "could not write manifest"
     manifest_candidate_hash="$PLIST_OPERATION_HASH"
     manifest_candidate_identity="$PLIST_OPERATION_IDENTITY"
     set_written_file_permissions "$manifest_candidate_path" "$state_is_system_path" "$manifest_candidate_hash" "$manifest_candidate_identity" || fail "could not set manifest permissions"
