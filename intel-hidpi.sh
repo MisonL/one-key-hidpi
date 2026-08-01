@@ -416,7 +416,7 @@ payload_dimensions() {
     local width
     local height
 
-    payload_hex="$(printf '%s' "$payload" | /usr/bin/base64 -D 2>/dev/null | /usr/bin/xxd -p -c 100)" || return 1
+    payload_hex="$(printf '%s' "$payload" | /usr/bin/base64 -D 2>/dev/null | /usr/bin/xxd -p -c 100 | /usr/bin/tr -d '\n')" || return 1
     [[ "$payload_hex" =~ ^[0-9A-Fa-f]{16,}$ ]] || return 1
 
     width_hex="${payload_hex:0:8}"

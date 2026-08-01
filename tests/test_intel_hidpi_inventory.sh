@@ -156,4 +156,23 @@ invalid_override_output="$("${repo_dir}/intel-hidpi.sh" inventory \
 assert_contains "$invalid_override_output" "  override=DisplayVendorID-30ae/DisplayProductID-62a5 (invalid)"
 assert_contains "$invalid_override_output" "  scale-resolutions=unavailable"
 
+long_override_root="${scratch_dir}/long-overrides"
+long_override_vendor_root="${long_override_root}/DisplayVendorID-30ae"
+long_override_path="${long_override_vendor_root}/DisplayProductID-62a5"
+long_payload_binary="${scratch_dir}/long-payload.bin"
+long_payload=""
+/bin/mkdir -p "$long_override_vendor_root"
+/usr/bin/plutil -create xml1 "$long_override_path" || fail "could not initialize long-payload override"
+/usr/bin/plutil -insert DisplayVendorID -integer 12462 "$long_override_path" || fail "could not write long-payload vendor id"
+/usr/bin/plutil -insert DisplayProductID -integer 25253 "$long_override_path" || fail "could not write long-payload product id"
+/usr/bin/plutil -insert scale-resolutions -array "$long_override_path" || fail "could not initialize long-payload mode array"
+printf '0000078000000438' | /usr/bin/xxd -r -p > "$long_payload_binary" || fail "could not create long-payload header"
+/usr/bin/head -c 96 /dev/zero >> "$long_payload_binary" || fail "could not create long-payload body"
+long_payload="$(/usr/bin/base64 < "$long_payload_binary" | /usr/bin/tr -d '\n')" || fail "could not encode long payload"
+/usr/bin/plutil -insert scale-resolutions.0 -data "$long_payload" "$long_override_path" || fail "could not write long payload"
+long_override_output="$("${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
+    --overrides-root "$long_override_root")" || fail "inventory with a long payload should succeed"
+assert_contains "$long_override_output" "    1920x1080 (104-byte payload)"
+
 printf 'PASS: Intel HiDPI inventory\n'
