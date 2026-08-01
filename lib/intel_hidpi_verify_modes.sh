@@ -21,8 +21,8 @@ capture_runtime_modes() {
     /usr/bin/swift "$runtime_source" --vendor-id "$vendor_id" --product-id "$product_id"
 }
 
-read_offline_mode_capture() {
-    local modes_file="$1"
+read_bounded_regular_file() {
+    local input_file="$1"
     local maximum_bytes="$2"
 
     # shellcheck disable=SC2016
@@ -45,7 +45,14 @@ read_offline_mode_capture() {
             $capture .= $chunk;
         }
         print $capture;
-    ' "$modes_file" "$maximum_bytes"
+    ' "$input_file" "$maximum_bytes"
+}
+
+read_offline_mode_capture() {
+    local modes_file="$1"
+    local maximum_bytes="$2"
+
+    read_bounded_regular_file "$modes_file" "$maximum_bytes"
 }
 
 parse_runtime_mode_capture() {

@@ -272,6 +272,8 @@ generate_smooth_preview_modes() {
     else
         smooth_mode_count="$smooth_available_count"
     fi
+    ((smooth_mode_count >= 2)) ||
+        fail "smooth mode generation produced fewer than two modes"
     for ((output_index = 0; output_index < smooth_mode_count; output_index++)); do
         smooth_sample_offset=$((output_index * (smooth_available_count - 1) / (smooth_mode_count - 1)))
         sample=$((smooth_first_sample + smooth_sample_offset))
@@ -397,8 +399,22 @@ native_resolution_from_edid() {
 
 scale_payloads_from_override() {
     local override_path="$1"
+    local expected_hash="$2"
+    local expected_identity="$3"
+    local scale_resolutions_xml
 
-    /usr/bin/plutil -extract scale-resolutions xml1 -o - "$override_path" 2>/dev/null |
+    scale_resolutions_xml="$(darwin_read_plist_file \
+        "$override_path" \
+        "$expected_hash" \
+        "$expected_identity" \
+        -extract scale-resolutions xml1 -expect array -o - 2>/dev/null)" || {
+        plist_file_is_valid "$override_path" "$expected_hash" "$expected_identity" || return 1
+        if ! plist_type "$override_path" "$expected_hash" "$expected_identity" scale-resolutions >/dev/null 2>&1; then
+            return 0
+        fi
+        return 1
+    }
+    printf '%s' "$scale_resolutions_xml" |
         /usr/bin/perl -0ne '
             while (m{<data>(.*?)</data>}sg) {
                 $value = $1;
@@ -429,12 +445,16 @@ payload_dimensions() {
 
 print_override_modes() {
     local override_path="$1"
+    local expected_hash="$2"
+    local expected_identity="$3"
     local payload
     local dimensions
     local resolution
     local payload_bytes
     local count=0
+    local payloads
 
+    payloads="$(scale_payloads_from_override "$override_path" "$expected_hash" "$expected_identity")" || return 1
     while IFS= read -r payload; do
         [[ -n "$payload" ]] || continue
 
@@ -446,7 +466,7 @@ print_override_modes() {
         payload_bytes="${dimensions##*:}"
         printf '    %s (%s-byte payload)\n' "$resolution" "$payload_bytes"
         count=$((count + 1))
-    done < <(scale_payloads_from_override "$override_path")
+    done <<< "$payloads"
 
     if ((count == 0)); then
         printf '  scale-resolutions=none\n'
@@ -465,6 +485,10 @@ print_inventory_entry() {
     local native_resolution
     local override_relative
     local override_path
+    local override_snapshot
+    local override_hash
+    local override_identity
+    local override_status=0
 
     vendor_hex="$(normalize_hex_id "${edid:16:4}")" || return 1
     product_hex="$(normalize_hex_id "${edid:22:2}${edid:20:2}")" || return 1
@@ -481,16 +505,41 @@ print_inventory_entry() {
     printf '  product-id=0x%s (%s)\n' "$product_hex" "$product_decimal"
     printf '  native-resolution=%s\n' "$native_resolution"
 
-    if [[ -f "$override_path" ]] && /usr/bin/plutil -lint "$override_path" >/dev/null 2>&1; then
-        printf '  override=%s (present)\n' "$override_relative"
-        print_override_modes "$override_path"
-    elif [[ -f "$override_path" ]]; then
-        printf '  override=%s (invalid)\n' "$override_relative"
-        printf '  scale-resolutions=unavailable\n'
-    else
+    override_snapshot="$(inventory_override_snapshot "$override_path")" || override_status=$?
+    case "$override_status" in
+    0)
+        IFS='|' read -r override_hash override_identity <<< "$override_snapshot"
+        if plist_file_is_valid "$override_path" "$override_hash" "$override_identity"; then
+            printf '  override=%s (present)\n' "$override_relative"
+            print_override_modes "$override_path" "$override_hash" "$override_identity" || return 1
+        else
+            printf '  override=%s (invalid)\n' "$override_relative"
+            printf '  scale-resolutions=unavailable\n'
+        fi
+        ;;
+    1)
         printf '  override=%s (absent)\n' "$override_relative"
         printf '  scale-resolutions=none\n'
-    fi
+        ;;
+    *)
+        fail "override target must be a regular non-symbolic-link file"
+        ;;
+    esac
+}
+
+inventory_override_snapshot() {
+    local override_path="$1"
+    local snapshot
+    local override_hash
+    local override_identity
+
+    path_has_disallowed_symbolic_link "$override_path" && return 2
+    [[ -e "$override_path" ]] || return 1
+    snapshot="$(darwin_file_snapshot "$override_path")" || return 2
+    IFS='|' read -r override_hash override_identity <<< "$snapshot"
+    valid_sha256 "$override_hash" || return 2
+    valid_file_identity "$override_identity" || return 2
+    printf '%s|%s\n' "$override_hash" "$override_identity"
 }
 
 inventory() {
@@ -501,10 +550,32 @@ inventory() {
     local normalized_edid
     local display_index=0
     local seen_edids=""
+    local capture_status=0
 
     if [[ -n "$ioreg_file" ]]; then
-        [[ -f "$ioreg_file" ]] || fail "ioreg fixture does not exist: ${ioreg_file}"
-        edid_source="$(/bin/cat "$ioreg_file")"
+        edid_source="$(read_bounded_regular_file "$ioreg_file" "$MAX_OFFLINE_MODE_CAPTURE_BYTES")" || capture_status=$?
+        case "$capture_status" in
+        0)
+            ;;
+        1)
+            fail "could not read ioreg fixture: ${ioreg_file}"
+            ;;
+        2)
+            fail "ioreg fixture must be a regular non-symbolic-link text file"
+            ;;
+        3)
+            fail "could not read ioreg fixture: ${ioreg_file}"
+            ;;
+        4)
+            fail "ioreg fixture contains NUL bytes"
+            ;;
+        5)
+            fail "ioreg fixture exceeds ${MAX_OFFLINE_MODE_CAPTURE_BYTES} bytes"
+            ;;
+        *)
+            fail "could not read ioreg fixture: ${ioreg_file}"
+            ;;
+        esac
     else
         edid_source="$(/usr/sbin/ioreg -lw0)" || fail "unable to read IODisplayEDID from ioreg"
     fi
@@ -547,6 +618,12 @@ run_inventory_command() {
         esac
     done
 
+    overrides_root="$(normalize_storage_root "$overrides_root")" ||
+        fail "overrides root is invalid or traverses a symbolic link"
+    if [[ -n "$ioreg_file" ]]; then
+        ioreg_file="$(normalize_storage_root "$ioreg_file")" ||
+            fail "ioreg fixture path is invalid or traverses a symbolic link"
+    fi
     inventory "$ioreg_file" "$overrides_root"
 }
 

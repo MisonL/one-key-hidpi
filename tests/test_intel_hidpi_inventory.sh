@@ -156,6 +156,33 @@ invalid_override_output="$("${repo_dir}/intel-hidpi.sh" inventory \
 assert_contains "$invalid_override_output" "  override=DisplayVendorID-30ae/DisplayProductID-62a5 (invalid)"
 assert_contains "$invalid_override_output" "  scale-resolutions=unavailable"
 
+missing_scale_override_root="${scratch_dir}/missing-scale-overrides"
+missing_scale_override_path="${missing_scale_override_root}/DisplayVendorID-30ae/DisplayProductID-62a5"
+/bin/mkdir -p "$(/usr/bin/dirname "$missing_scale_override_path")" || fail "could not create missing-scale override fixture"
+/usr/bin/plutil -create xml1 "$missing_scale_override_path" || fail "could not initialize missing-scale override fixture"
+/usr/bin/plutil -insert DisplayVendorID -integer 12462 "$missing_scale_override_path" || fail "could not write missing-scale vendor id"
+/usr/bin/plutil -insert DisplayProductID -integer 25253 "$missing_scale_override_path" || fail "could not write missing-scale product id"
+missing_scale_output="$("${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
+    --overrides-root "$missing_scale_override_root")" || fail "valid override without scale-resolutions should be reported"
+assert_contains "$missing_scale_output" "  override=DisplayVendorID-30ae/DisplayProductID-62a5 (present)"
+assert_contains "$missing_scale_output" "  scale-resolutions=none"
+
+wrong_scale_override_root="${scratch_dir}/wrong-scale-overrides"
+wrong_scale_override_path="${wrong_scale_override_root}/DisplayVendorID-30ae/DisplayProductID-62a5"
+/bin/mkdir -p "$(/usr/bin/dirname "$wrong_scale_override_path")" || fail "could not create wrong-scale override fixture"
+/usr/bin/plutil -create xml1 "$wrong_scale_override_path" || fail "could not initialize wrong-scale override fixture"
+/usr/bin/plutil -insert DisplayVendorID -integer 12462 "$wrong_scale_override_path" || fail "could not write wrong-scale vendor id"
+/usr/bin/plutil -insert DisplayProductID -integer 25253 "$wrong_scale_override_path" || fail "could not write wrong-scale product id"
+/usr/bin/plutil -insert scale-resolutions -string wrong-type "$wrong_scale_override_path" || fail "could not write wrong-scale fixture"
+wrong_scale_output=""
+if wrong_scale_output="$("${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
+    --overrides-root "$wrong_scale_override_root" 2>&1)"; then
+    fail "override with a non-array scale-resolutions value must fail explicitly"
+fi
+assert_contains "$wrong_scale_output" "error: could not parse display 1"
+
 long_override_root="${scratch_dir}/long-overrides"
 long_override_vendor_root="${long_override_root}/DisplayVendorID-30ae"
 long_override_path="${long_override_vendor_root}/DisplayProductID-62a5"
@@ -174,5 +201,43 @@ long_override_output="$("${repo_dir}/intel-hidpi.sh" inventory \
     --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
     --overrides-root "$long_override_root")" || fail "inventory with a long payload should succeed"
 assert_contains "$long_override_output" "    1920x1080 (104-byte payload)"
+
+ioreg_link_target="${scratch_dir}/ioreg-link-target.txt"
+ioreg_link="${scratch_dir}/ioreg-link.txt"
+/bin/cp "${fixture_dir}/ioreg-displays.txt" "$ioreg_link_target" || fail "could not create ioreg link target"
+/bin/ln -s "$ioreg_link_target" "$ioreg_link" || fail "could not create ioreg link"
+ioreg_link_output=""
+if ioreg_link_output="$("${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "$ioreg_link" \
+    --overrides-root "${fixture_dir}/overrides" 2>&1)"; then
+    fail "inventory must reject a symbolic-link ioreg fixture"
+fi
+assert_contains "$ioreg_link_output" "error: ioreg fixture path is invalid or traverses a symbolic link"
+
+linked_overrides_root="${scratch_dir}/linked-overrides"
+/bin/ln -s "${fixture_dir}/overrides" "$linked_overrides_root" || fail "could not create overrides root link"
+linked_root_output=""
+if linked_root_output="$("${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
+    --overrides-root "$linked_overrides_root" 2>&1)"; then
+    fail "inventory must reject a symbolic-link overrides root"
+fi
+assert_contains "$linked_root_output" "error: overrides root is invalid or traverses a symbolic link"
+
+target_symlink_root="${scratch_dir}/target-symlink-overrides"
+target_symlink_vendor_root="${target_symlink_root}/DisplayVendorID-30ae"
+target_symlink_outside="${scratch_dir}/target-symlink-outside.plist"
+target_symlink_path="${target_symlink_vendor_root}/DisplayProductID-62a5"
+/bin/mkdir -p "$target_symlink_vendor_root" || fail "could not create target symlink root"
+printf 'outside target\n' > "$target_symlink_outside" || fail "could not create target symlink outside file"
+/bin/ln -s "$target_symlink_outside" "$target_symlink_path" || fail "could not create target override symlink"
+target_symlink_output=""
+if target_symlink_output="$("${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
+    --overrides-root "$target_symlink_root" 2>&1)"; then
+    fail "inventory must reject a symbolic-link override target"
+fi
+assert_contains "$target_symlink_output" "error: override target must be a regular non-symbolic-link file"
+[[ "$(/bin/cat "$target_symlink_outside")" == "outside target" ]] || fail "symbolic-link target outside file must remain unchanged"
 
 printf 'PASS: Intel HiDPI inventory\n'

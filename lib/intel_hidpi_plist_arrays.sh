@@ -117,7 +117,7 @@ append_missing_data_payloads_to_plist_array_xml() {
     updated_array_xml="$(printf '%s' "$plist_array_xml" | /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/ruby -rrexml/document -rrexml/formatters/default -e '
         REXML::Security.entity_expansion_limit = 1000
         REXML::Security.entity_expansion_text_limit = 1_048_576
-        generated_payloads = ARGV.fetch(0).split("\n").reject(&:empty?)
+        generated_payloads = IO.for_fd(3).read.split("\n").reject(&:empty?)
         document = REXML::Document.new(STDIN.read)
         root = document.root
         top_level_elements = root&.elements&.to_a || []
@@ -141,7 +141,7 @@ append_missing_data_payloads_to_plist_array_xml() {
         output = String.new
         REXML::Formatters::Default.new.write(document, output)
         print output
-    ' "$generated_payloads")" || return 1
+    ' 3<<< "$generated_payloads")" || return 1
 
     if ! plist_xml_argument_is_within_limit "$updated_array_xml"; then
         printf 'error: scale-resolutions array exceeds the batch update size limit\n' >&2

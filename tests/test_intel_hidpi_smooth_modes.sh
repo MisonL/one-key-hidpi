@@ -306,4 +306,10 @@ assert_document_contains "${repo_dir}/README.md" "When applying a previewed sele
 # shellcheck disable=SC2016
 assert_document_contains "${repo_dir}/README-zh.md" '将预览结果应用到 override 时，`apply` 必须复用预览所用的'
 
+if /usr/bin/grep -Fq 'generated_payloads = ARGV' "${repo_dir}/lib/intel_hidpi_plist_arrays.sh"; then
+    fail "Ruby payload transport must not use command-line arguments"
+fi
+/usr/bin/grep -Fq 'IO.for_fd(3).read' "${repo_dir}/lib/intel_hidpi_plist_arrays.sh" ||
+    fail "Ruby payload transport must use file descriptor 3"
+
 printf 'PASS: Intel HiDPI smooth modes\n'
