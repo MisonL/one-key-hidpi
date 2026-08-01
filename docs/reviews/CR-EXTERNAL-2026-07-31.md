@@ -59,6 +59,41 @@ OMP 原始复核唯一明确提出的缺口是同一迭代内没有直接断言 
 3. 宽高 32 位上界缺口是理论防御项，已由 IH-026 实施；当前显示器尺寸远低于该边界。
 4. “本轮不修改业务 .sh 或 .swift、不改变 TASKS.md 状态”仅适用于原始复核轮次。
 
+## 稳定摘要和原始工件边界
+
+以下摘要是本仓库长期审查记录的一部分，不依赖外部 CLI 会话是否仍可恢复：
+
+| 复核方 | CLI/模型 | 会话 | 退出码 | 稳定结论 |
+| --- | --- | --- | --- | --- |
+| Claude | CLI `2.1.220`；请求模型 `claude-sonnet-4-6`；运行时标识 `claude-sonnet-5` | `49168cbc-c35c-430b-b294-2931b35aca6f` | `0` | 窄范围内未确认当前输入路径可触发的缺陷；列出的未覆盖边界见上文 |
+| OMP | `17.1.8` / `newapi-anthropic/claude-sonnet-4-6` | `73274` | `0` | 未确认高或中风险的当前可触发问题；同一迭代 payload 互比建议已由 IH-026 收口 |
+
+原始 JSONL 只用于当时的审计追溯，不把它作为唯一通过证据。当前已知工件信息如下；路径位于
+`/private/tmp`，可能因系统清理或会话结束而消失：
+
+| 工件 | 大小 | SHA-256 |
+| --- | ---: | --- |
+| `/private/tmp/one-key-hidpi-claude-final.bhoDYT/claude.jsonl` | `243600` 字节 | `36fc053cea5038950d17ea6185faa2e9a5378c766cca7f81a552dbe2d3a5af27` |
+| `/private/tmp/one-key-hidpi-omp-final.wC3Rbs/omp.jsonl` | `312966` 字节 | `6dae6c45447822fd1cde8830c5b6410bd376cdec81f42d4428110295cfd50327` |
+
+若临时文件仍存在，可用以下只读命令复核哈希；文件不存在时不应把缺失误判为复核失败，
+也不能据此否定本节已经固化的摘要：
+
+```sh
+for file in \
+  /private/tmp/one-key-hidpi-claude-final.bhoDYT/claude.jsonl \
+  /private/tmp/one-key-hidpi-omp-final.wC3Rbs/omp.jsonl; do
+    if [ -f "$file" ]; then
+        /usr/bin/shasum -a 256 "$file"
+    else
+        printf '原始工件不存在（摘要仍以本记录为准）: %s\n' "$file"
+    fi
+done
+```
+
+这两个文件可能包含外部 CLI 的完整会话元数据和审查正文，因此不复制进仓库，也不在本记录中
+嵌入其原始内容。后续复核应以本节摘要、现有本地测试和代码事实为准。
+
 ## 未覆盖边界
 
 - `data_payload_list_has_value` 的独立实现及其精确匹配语义。
