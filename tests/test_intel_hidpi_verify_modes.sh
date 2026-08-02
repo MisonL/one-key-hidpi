@@ -3,7 +3,10 @@
 set -u
 
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
-scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-verify-modes.XXXXXX")"
+scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-verify-modes.XXXXXX")" || {
+    printf 'FAIL: could not create scratch directory\n' >&2
+    exit 1
+}
 
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -36,6 +39,15 @@ binary_modes_path="${scratch_dir}/binary-modes.txt"
 symlink_modes_path="${scratch_dir}/symlink-modes.txt"
 oversized_modes_path="${scratch_dir}/oversized-modes.txt"
 missing_modes_path="${scratch_dir}/missing-modes.txt"
+directory_modes_path="${scratch_dir}/directory-modes"
+
+# shellcheck disable=SC2016
+/usr/bin/grep -Fq 'darwin_read_bounded_file "$normalized_input_file" "$maximum_bytes"' \
+    "${repo_dir}/lib/intel_hidpi_verify_modes.sh" ||
+    fail "offline reads must use the descriptor-relative Darwin helper"
+if /usr/bin/grep -Fq 'sysopen' "${repo_dir}/lib/intel_hidpi_verify_modes.sh"; then
+    fail "offline reads must not reopen the input by path"
+fi
 
 cat > "$full_modes_path" <<'EOF'
 target|vendor-id=000030AE|product-id=000062a5
@@ -244,6 +256,17 @@ if symlink_modes_output="$("${repo_dir}/intel-hidpi.sh" verify-modes \
     fail "a symbolic-link capture file must fail"
 fi
 assert_contains "$symlink_modes_output" "error: modes file must be a regular non-symbolic-link text file"
+
+/bin/mkdir "$directory_modes_path" || fail "could not create directory capture fixture"
+directory_modes_output=""
+if directory_modes_output="$("${repo_dir}/intel-hidpi.sh" verify-modes \
+    --vendor-id 30ae \
+    --product-id 62a5 \
+    --native-resolution 1920x1080 \
+    --modes-file "$directory_modes_path" 2>&1)"; then
+    fail "a directory capture path must fail"
+fi
+assert_contains "$directory_modes_output" "error: modes file must be a regular non-symbolic-link text file"
 
 /usr/bin/perl -e 'print "x" x 1048577' > "$oversized_modes_path" || fail "could not create oversized capture fixture"
 oversized_modes_output=""

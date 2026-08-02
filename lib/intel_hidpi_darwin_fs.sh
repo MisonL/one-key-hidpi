@@ -49,11 +49,17 @@ darwin_secure_fs() {
             RENAME_EXCL = 0x00000004
             RENAME_NOFOLLOW_ANY = 0x00000010
             COPYFILE_ALL = 0x0000000f
+            OUTPUT_LIMIT_EXCEEDED = 6
+            NON_REGULAR_FILE = 7
+            SOURCE_LIMIT_EXCEEDED = 8
 
             class Failure < StandardError
                 def self.raise_failure
                     raise new
                 end
+            end
+
+            class OutputLimitExceeded < StandardError
             end
 
         def normalize(path)
@@ -321,6 +327,127 @@ darwin_secure_fs() {
             output
         rescue StandardError
             Failure.raise_failure
+        end
+
+        def terminate_child(wait_thread)
+            return unless wait_thread.alive?
+
+            begin
+                Process.kill("TERM", wait_thread.pid)
+            rescue StandardError
+                nil
+            end
+            wait_thread.join(1)
+            return unless wait_thread.alive?
+
+            begin
+                Process.kill("KILL", wait_thread.pid)
+            rescue StandardError
+                nil
+            end
+            wait_thread.join
+        end
+
+        def bounded_plist_output(fd, maximum_bytes, *arguments)
+            Failure.raise_failure unless maximum_bytes.match?(/\A[1-9][0-9]*\z/)
+            limit = Integer(maximum_bytes, 10)
+            io = IO.for_fd(fd, autoclose: false)
+            io.close_on_exec = false
+            output = String.new
+            process_status = nil
+            Open3.popen3("/usr/bin/plutil", *arguments, "/dev/fd/#{fd}") do |stdin, stdout, stderr, wait_thread|
+                stderr_reader = Thread.new do
+                    loop do
+                        chunk = stderr.read(64 * 1024)
+                        break if chunk.nil? || chunk.empty?
+                    end
+                end
+                terminate_requested = false
+                begin
+                    loop do
+                        chunk = stdout.read(64 * 1024)
+                        break if chunk.nil? || chunk.empty?
+                        if output.bytesize + chunk.bytesize > limit
+                            terminate_requested = true
+                            raise OutputLimitExceeded
+                        end
+                        output << chunk
+                    end
+                rescue StandardError
+                    terminate_requested = true
+                    raise
+                ensure
+                    terminate_child(wait_thread) if terminate_requested
+                    stdin.close unless stdin.closed?
+                    stdout.close unless stdout.closed?
+                    stderr_reader.join
+                    stderr.close unless stderr.closed?
+                    process_status = wait_thread.value
+                end
+            end
+            Failure.raise_failure unless process_status&.success?
+            output
+        rescue OutputLimitExceeded
+            exit OUTPUT_LIMIT_EXCEEDED
+        rescue StandardError
+            Failure.raise_failure
+        end
+
+        def plist_key_type(fd, maximum_bytes, key_name)
+            xml = bounded_plist_output(fd, maximum_bytes, "-convert", "xml1", "-o", "-")
+            require "rexml/document"
+            REXML::Security.entity_expansion_limit = 1000
+            REXML::Security.entity_expansion_text_limit = 1_048_576
+            document = REXML::Document.new(xml)
+            root = document.root
+            dict = root&.elements&.to_a&.first
+            Failure.raise_failure unless root&.name == "plist" && dict&.name == "dict"
+            elements = dict.elements.to_a
+            elements.each_with_index do |element, index|
+                next unless element.name == "key" && element.text == key_name
+
+                value = elements[index + 1]
+                Failure.raise_failure unless value
+                puts value.name
+                return 0
+            end
+            2
+        rescue REXML::ParseException
+            Failure.raise_failure
+        end
+
+        def read_bounded_file(path, maximum_bytes)
+            directory_fd, name = open_directory_parent(path)
+            flags = Fcntl::O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW
+            fd = DarwinSecureFs.openat(directory_fd, name, flags, 0)
+            if fd < 0
+                status = Fiddle.last_error == Errno::ELOOP::Errno ? 2 : 1
+                DarwinSecureFs.close(directory_fd)
+                exit status
+            end
+            begin
+                stat = IO.for_fd(fd, autoclose: false).stat
+                unless stat.file? && stat.nlink == 1
+                    DarwinSecureFs.close(fd)
+                    DarwinSecureFs.close(directory_fd)
+                    exit NON_REGULAR_FILE
+                end
+                io = IO.for_fd(fd, autoclose: false)
+                output = String.new
+                loop do
+                    chunk = io.read(64 * 1024)
+                    break if chunk.nil? || chunk.empty?
+                    exit 4 if chunk.include?("\0")
+                    exit 5 if output.bytesize + chunk.bytesize > Integer(maximum_bytes, 10)
+                    output << chunk
+                end
+                print output
+            rescue IOError, SystemCallError
+                exit 3
+            ensure
+                DarwinSecureFs.close(fd) if defined?(fd) && fd && fd >= 0
+                DarwinSecureFs.close(directory_fd) if defined?(directory_fd) && directory_fd && directory_fd >= 0
+            end
         end
 
         def verify_read_fd(directory_fd, name, fd, expected_hash, expected_identity)
@@ -608,6 +735,40 @@ darwin_secure_fs() {
             print output
             DarwinSecureFs.close(target_fd)
             DarwinSecureFs.close(target_directory_fd)
+        when "read-plist-bounded"
+            target_path, expected_hash, expected_identity, maximum_source_bytes, maximum_output_bytes, *plutil_args = arguments
+            Failure.raise_failure unless maximum_source_bytes&.match?(/\A[1-9][0-9]*\z/)
+            target_directory, target_name = split_file_path(target_path)
+            target_directory_fd = open_directory_path(target_directory)
+            target_fd = open_regular_file(target_directory_fd, target_name)
+            source_limit = Integer(maximum_source_bytes, 10)
+            exit SOURCE_LIMIT_EXCEEDED unless IO.for_fd(target_fd, autoclose: false).stat.size <= source_limit
+            Failure.raise_failure unless expected_sha256?(target_fd, expected_hash)
+            Failure.raise_failure unless expected_identity?(target_fd, expected_identity)
+            output = bounded_plist_output(target_fd, maximum_output_bytes, *plutil_args)
+            verify_read_fd(target_directory_fd, target_name, target_fd, expected_hash, expected_identity)
+            print output
+            DarwinSecureFs.close(target_fd)
+            DarwinSecureFs.close(target_directory_fd)
+        when "plist-key-type"
+            target_path, expected_hash, expected_identity, maximum_source_bytes, maximum_output_bytes, key_name = arguments
+            Failure.raise_failure unless maximum_source_bytes&.match?(/\A[1-9][0-9]*\z/)
+            target_directory, target_name = split_file_path(target_path)
+            target_directory_fd = open_directory_path(target_directory)
+            target_fd = open_regular_file(target_directory_fd, target_name)
+            source_limit = Integer(maximum_source_bytes, 10)
+            exit SOURCE_LIMIT_EXCEEDED unless IO.for_fd(target_fd, autoclose: false).stat.size <= source_limit
+            Failure.raise_failure unless expected_sha256?(target_fd, expected_hash)
+            Failure.raise_failure unless expected_identity?(target_fd, expected_identity)
+            type_status = plist_key_type(target_fd, maximum_output_bytes, key_name)
+            verify_read_fd(target_directory_fd, target_name, target_fd, expected_hash, expected_identity)
+            DarwinSecureFs.close(target_fd)
+            DarwinSecureFs.close(target_directory_fd)
+            exit type_status unless type_status == 0
+        when "read-bounded"
+            path, maximum_bytes = arguments
+            Failure.raise_failure unless maximum_bytes&.match?(/\A[1-9][0-9]*\z/)
+            read_bounded_file(path, maximum_bytes)
         when "plutil"
             target_path, expected_hash, expected_identity, *plutil_args = arguments
             target_directory, target_name = split_file_path(target_path)
@@ -914,6 +1075,36 @@ darwin_read_plist_file() {
 
     shift 3
     darwin_secure_fs read-plist "$target_path" "$expected_hash" "$expected_identity" "$@"
+}
+
+darwin_read_bounded_plist_file() {
+    local target_path="$1"
+    local expected_hash="$2"
+    local expected_identity="$3"
+    local maximum_source_bytes="$4"
+    local maximum_output_bytes="$5"
+
+    shift 5
+    darwin_secure_fs read-plist-bounded \
+        "$target_path" "$expected_hash" "$expected_identity" \
+        "$maximum_source_bytes" "$maximum_output_bytes" "$@"
+}
+
+darwin_plist_key_type() {
+    local target_path="$1"
+    local expected_hash="$2"
+    local expected_identity="$3"
+    local maximum_source_bytes="$4"
+    local maximum_output_bytes="$5"
+    local key_name="$6"
+
+    darwin_secure_fs plist-key-type \
+        "$target_path" "$expected_hash" "$expected_identity" \
+        "$maximum_source_bytes" "$maximum_output_bytes" "$key_name"
+}
+
+darwin_read_bounded_file() {
+    darwin_secure_fs read-bounded "$1" "$2"
 }
 
 darwin_replace_file() {

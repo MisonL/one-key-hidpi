@@ -181,7 +181,7 @@ if wrong_scale_output="$("${repo_dir}/intel-hidpi.sh" inventory \
     --overrides-root "$wrong_scale_override_root" 2>&1)"; then
     fail "override with a non-array scale-resolutions value must fail explicitly"
 fi
-assert_contains "$wrong_scale_output" "error: could not parse display 1"
+assert_contains "$wrong_scale_output" "error: could not read override scale-resolutions (status 1)"
 
 long_override_root="${scratch_dir}/long-overrides"
 long_override_vendor_root="${long_override_root}/DisplayVendorID-30ae"
@@ -201,6 +201,43 @@ long_override_output="$("${repo_dir}/intel-hidpi.sh" inventory \
     --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
     --overrides-root "$long_override_root")" || fail "inventory with a long payload should succeed"
 assert_contains "$long_override_output" "    1920x1080 (104-byte payload)"
+
+oversized_override_root="${scratch_dir}/oversized-overrides"
+oversized_override_vendor_root="${oversized_override_root}/DisplayVendorID-30ae"
+oversized_override_path="${oversized_override_vendor_root}/DisplayProductID-62a5"
+oversized_payload_binary="${scratch_dir}/oversized-payload.bin"
+oversized_payload=""
+/bin/mkdir -p "$oversized_override_vendor_root" || fail "could not create oversized override root"
+/usr/bin/plutil -create xml1 "$oversized_override_path" || fail "could not initialize oversized override"
+/usr/bin/plutil -insert DisplayVendorID -integer 12462 "$oversized_override_path" || fail "could not write oversized override vendor id"
+/usr/bin/plutil -insert DisplayProductID -integer 25253 "$oversized_override_path" || fail "could not write oversized override product id"
+/usr/bin/plutil -insert scale-resolutions -array "$oversized_override_path" || fail "could not initialize oversized override mode array"
+/usr/bin/head -c 100000 /dev/zero > "$oversized_payload_binary" || fail "could not create oversized payload"
+oversized_payload="$(/usr/bin/base64 < "$oversized_payload_binary" | /usr/bin/tr -d '\n')" || fail "could not encode oversized payload"
+/usr/bin/plutil -insert scale-resolutions.0 -data "$oversized_payload" "$oversized_override_path" || fail "could not write oversized payload"
+oversized_output=""
+if oversized_output="$("${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
+    --overrides-root "$oversized_override_root" 2>&1)"; then
+    fail "inventory must reject an oversized scale-resolutions XML payload"
+fi
+assert_contains "$oversized_output" "error: override scale-resolutions exceeds 131072 bytes"
+
+source_oversized_root="${scratch_dir}/source-oversized-overrides"
+source_oversized_vendor_root="${source_oversized_root}/DisplayVendorID-30ae"
+source_oversized_path="${source_oversized_vendor_root}/DisplayProductID-62a5"
+/bin/mkdir -p "$source_oversized_vendor_root" || fail "could not create source-oversized override root"
+/bin/cp "${fixture_dir}/overrides/DisplayVendorID-30ae/DisplayProductID-62a5" "$source_oversized_path" ||
+    fail "could not copy source-oversized override"
+/usr/bin/yes ' ' | /usr/bin/head -c 1049000 >> "$source_oversized_path" ||
+    fail "could not enlarge source-oversized override"
+source_oversized_output=""
+if source_oversized_output="$("${repo_dir}/intel-hidpi.sh" inventory \
+    --ioreg-file "${fixture_dir}/ioreg-displays.txt" \
+    --overrides-root "$source_oversized_root" 2>&1)"; then
+    fail "inventory must reject an oversized override plist source"
+fi
+assert_contains "$source_oversized_output" "error: override plist exceeds 1048576 bytes"
 
 ioreg_link_target="${scratch_dir}/ioreg-link-target.txt"
 ioreg_link="${scratch_dir}/ioreg-link.txt"

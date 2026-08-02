@@ -24,28 +24,10 @@ capture_runtime_modes() {
 read_bounded_regular_file() {
     local input_file="$1"
     local maximum_bytes="$2"
+    local normalized_input_file
 
-    # shellcheck disable=SC2016
-    /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/perl -MFcntl=:DEFAULT -e '
-        my ($path, $maximum_bytes) = @ARGV;
-        exit 1 unless defined $maximum_bytes && $maximum_bytes =~ /\A[1-9][0-9]*\z/;
-        my @path_stat = lstat($path);
-        exit 1 unless @path_stat;
-        exit 2 if -l _ || !-f _;
-        sysopen(my $handle, $path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) or exit 1;
-        -f $handle or exit 2;
-
-        my $capture = q{};
-        while (1) {
-            my $read = read($handle, my $chunk, 64 * 1024);
-            exit 3 unless defined $read;
-            last if $read == 0;
-            exit 4 if $chunk =~ /\0/;
-            exit 5 if length($capture) + $read > $maximum_bytes;
-            $capture .= $chunk;
-        }
-        print $capture;
-    ' "$input_file" "$maximum_bytes"
+    normalized_input_file="$(normalize_lexical_path "$input_file")" || return 1
+    darwin_read_bounded_file "$normalized_input_file" "$maximum_bytes"
 }
 
 read_offline_mode_capture() {
@@ -311,6 +293,9 @@ run_verify_modes_command() {
             ;;
         5)
             fail "modes file exceeds ${MAX_OFFLINE_MODE_CAPTURE_BYTES} bytes"
+            ;;
+        7)
+            fail "modes file must be a regular non-symbolic-link text file"
             ;;
         *)
             fail "could not read modes file"

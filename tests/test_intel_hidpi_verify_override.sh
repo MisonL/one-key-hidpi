@@ -4,7 +4,10 @@ set -u
 set -o pipefail
 
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
-scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-verify-override.XXXXXX")"
+scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/one-key-hidpi-verify-override.XXXXXX")" || {
+    printf 'FAIL: could not create scratch directory\n' >&2
+    exit 1
+}
 overrides_root="${scratch_dir}/overrides"
 state_root="${scratch_dir}/state"
 target_path="${overrides_root}/DisplayVendorID-30ae/DisplayProductID-62a5"

@@ -402,17 +402,26 @@ scale_payloads_from_override() {
     local expected_hash="$2"
     local expected_identity="$3"
     local scale_resolutions_xml
+    local type_status
 
-    scale_resolutions_xml="$(darwin_read_plist_file \
+    scale_resolutions_xml="$(darwin_read_bounded_plist_file \
         "$override_path" \
         "$expected_hash" \
         "$expected_identity" \
+        "$MAX_PLIST_XML_BYTES" \
+        "$MAX_BULK_PLIST_ARRAY_XML_BYTES" \
         -extract scale-resolutions xml1 -expect array -o - 2>/dev/null)" || {
+        local read_status=$?
+        ((read_status == 6)) && return 6
+        ((read_status == 8)) && return 8
         plist_file_is_valid "$override_path" "$expected_hash" "$expected_identity" || return 1
-        if ! plist_type "$override_path" "$expected_hash" "$expected_identity" scale-resolutions >/dev/null 2>&1; then
+        if plist_type "$override_path" "$expected_hash" "$expected_identity" scale-resolutions >/dev/null 2>&1; then
+            return 1
+        else
+            type_status=$?
+            ((type_status == 2)) || return 1
             return 0
         fi
-        return 1
     }
     printf '%s' "$scale_resolutions_xml" |
         /usr/bin/perl -0ne '
@@ -454,7 +463,15 @@ print_override_modes() {
     local count=0
     local payloads
 
-    payloads="$(scale_payloads_from_override "$override_path" "$expected_hash" "$expected_identity")" || return 1
+    payloads="$(scale_payloads_from_override "$override_path" "$expected_hash" "$expected_identity")" || {
+        local payload_status=$?
+        if ((payload_status == 6)); then
+            fail "override scale-resolutions exceeds ${MAX_BULK_PLIST_ARRAY_XML_BYTES} bytes"
+        elif ((payload_status == 8)); then
+            fail "override plist exceeds ${MAX_PLIST_XML_BYTES} bytes"
+        fi
+        fail "could not read override scale-resolutions (status ${payload_status})"
+    }
     while IFS= read -r payload; do
         [[ -n "$payload" ]] || continue
 
@@ -571,6 +588,9 @@ inventory() {
             ;;
         5)
             fail "ioreg fixture exceeds ${MAX_OFFLINE_MODE_CAPTURE_BYTES} bytes"
+            ;;
+        7)
+            fail "ioreg fixture must be a regular non-symbolic-link text file"
             ;;
         *)
             fail "could not read ioreg fixture: ${ioreg_file}"

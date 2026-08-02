@@ -514,7 +514,9 @@ plist_type() {
 
     valid_sha256 "$expected_hash" || return 1
     valid_file_identity "$expected_identity" || return 1
-    darwin_read_plist_file "$plist_path" "$expected_hash" "$expected_identity" -type "$key_path"
+    darwin_plist_key_type \
+        "$plist_path" "$expected_hash" "$expected_identity" \
+        "$MAX_PLIST_XML_BYTES" "$MAX_PLIST_XML_BYTES" "$key_path"
 }
 
 verified_scale_payloads_from_override() {

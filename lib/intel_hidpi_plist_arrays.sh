@@ -1,13 +1,16 @@
 # shellcheck shell=bash
 
 readonly MAX_BULK_PLIST_ARRAY_XML_BYTES=131072
+readonly MAX_PLIST_XML_BYTES=1048576
 
 scale_resolutions_xml_from_override() {
     local override_path="$1"
     local expected_hash="$2"
     local expected_identity="$3"
 
-    darwin_read_plist_file "$override_path" "$expected_hash" "$expected_identity" \
+    darwin_read_bounded_plist_file \
+        "$override_path" "$expected_hash" "$expected_identity" \
+        "$MAX_PLIST_XML_BYTES" "$MAX_BULK_PLIST_ARRAY_XML_BYTES" \
         -extract scale-resolutions xml1 -expect array -o -
 }
 
